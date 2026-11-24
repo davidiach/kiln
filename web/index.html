@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln playground</title>
+<meta name="description" content="Kiln is a tiny statically typed language that compiles to WebAssembly in your browser, as you type.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 30V14a12 12 0 0 1 24 0v16z' fill='%231f4fd6'/%3E%3Cpath d='M16 27c-4 0-6-3-5-6 1-2 3-3 3-6 3 2 6 5 6 8 0 2-2 4-4 4z' fill='%23ff7b47'/%3E%3C/svg%3E">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#hello" aria-label="Kiln home">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 30V14a12 12 0 0 1 24 0v16z" class="kiln"/><path d="M16 27c-4 0-6-3-5-6 1-2 3-3 3-6 3 2 6 5 6 8 0 2-2 4-4 4z" class="flame"/></svg>
+    <span>Kiln</span>
+  </a>
+  <p class="tagline">A tiny typed language, compiled to WebAssembly as you type.</p>
+  <div class="actions">
+    <label class="sr" for="example">Example</label>
+    <select id="example" title="Load an example"></select>
+    <button id="run" class="primary" title="Run from the start (Ctrl+Enter)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Run</button>
+    <button id="stop" title="Stop the program"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg>Stop</button>
+    <button id="share" title="Copy a link to this code">Share</button>
+  </div>
+</header>
+
+<main class="app">
+  <section class="pane edit-pane" aria-label="Editor">
+    <div class="pane-head">
+      <span id="filename">hello.kiln</span>
+      <label class="live"><input type="checkbox" id="live" checked> Live</label>
+      <button id="revert" class="link" hidden>Revert to original</button>
+    </div>
+    <div id="editor"></div>
+    <div id="problems" class="problems" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="pane out-pane" aria-label="Output">
+    <div class="screen-wrap">
+      <canvas id="screen" width="320" height="240" tabindex="0" aria-label="Program output. Click to focus for keyboard input."></canvas>
+      <button id="fullscreen" class="ghost" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+    </div>
+    <div class="status">
+      <span id="runstate" class="runstate">idle</span>
+      <span id="stats" class="stats"></span>
+    </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="console" aria-selected="true">Console</button>
+      <button role="tab" data-tab="wat" aria-selected="false">WebAssembly</button>
+      <button role="tab" data-tab="bytes" aria-selected="false">Bytes</button>
+      <button role="tab" data-tab="ref" aria-selected="false">Reference</button>
+    </div>
+    <div class="tab-body">
+      <div id="tab-console" class="tab console" role="tabpanel"></div>
+      <div id="tab-wat" class="tab" role="tabpanel" hidden><pre class="wat"></pre></div>
+      <div id="tab-bytes" class="tab" role="tabpanel" hidden><div class="legend"></div><pre class="hex"></pre></div>
+      <div id="tab-ref" class="tab ref" role="tabpanel" hidden>
+        <h3>Programs</h3>
+        <p><code>fn main()</code> runs once. <code>fn frame(t: float)</code> runs every animation frame, with <code>t</code> in seconds. The screen is <code>WIDTH</code> × <code>HEIGHT</code> (320 × 240) and colors are <code>0xRRGGBB</code>.</p>
+        <h3>Values</h3>
+        <pre>let x = 3;            // immutable, type inferred
+var y: float = 1.5;   // mutable
+const N = 64;         // compile-time constant
+var grid: [int; N * N];   // arrays live at top level
+let pal = [0xff0000, 0x00ff00];
+let s = "text";       // strings: len(s), s[i] gives a byte</pre>
+        <p>Types: <code>int</code> (32-bit), <code>float</code> (64-bit), <code>bool</code>, <code>str</code>. Nothing converts silently: write <code>x as float</code>. Integer literals do adapt to floats, so <code>x * 2</code> works.</p>
+        <h3>Control flow</h3>
+        <pre>if a &lt; b { } else if c { } else { }
+while cond { break; continue; }
+for i in 0..10 { }    // 0 to 9
+for i in 1..=10 { }   // 1 to 10
+let m = a &gt; b ? a : b;</pre>
+        <h3>Operators</h3>
+        <p><code>+ - * / %</code> · <code>== != &lt; &lt;= &gt; &gt;=</code> · <code>&amp;&amp; || !</code> · <code>&amp; | ^ ~ &lt;&lt; &gt;&gt; &gt;&gt;&gt;</code> · compound <code>+=</code> etc. Bitwise operators bind tighter than comparisons.</p>
+        <h3>Built in</h3>
+        <dl>
+          <dt>Math</dt><dd>sqrt floor ceil trunc round abs min max clamp sin cos tan asin acos atan atan2 exp log pow fract mix smoothstep sign length</dd>
+          <dt>Drawing</dt><dd>pixel(x, y, c) · get_pixel(x, y) · clear(c) · rect(x, y, w, h, c) · circle(x, y, r, c) · line(x0, y0, x1, y1, c) · the <code>screen</code> array</dd>
+          <dt>Color</dt><dd>rgb(r, g, b) with ints 0..255 · rgbf(r, g, b) with floats 0..1 · hsv(h, s, v) · blend(a, b, t)</dd>
+          <dt>Text</dt><dd>text(x, y, s, c) · text_big(x, y, s, size, c) · number(x, y, n, c) · text_width(s) · print(a, b, ...)</dd>
+          <dt>Input</dt><dd>mouse_x() mouse_y() mouse_down() · key_down(code) with KEY_LEFT KEY_RIGHT KEY_UP KEY_DOWN KEY_SPACE KEY_ENTER, or a letter's code like 65 for A</dd>
+          <dt>Random</dt><dd>rand() in 0..1 · hash(n) · hash2(x, y) · hashf(n) · noise(x, y) · fbm(x, y, octaves)</dd>
+          <dt>Other</dt><dd>select(cond, a, b) · len(array or string) · PI · TAU</dd>
+        </dl>
+        <h3>Keys</h3>
+        <p><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs from the start · <kbd>Ctrl</kbd>+<kbd>/</kbd> comments lines · click the screen to give it the keyboard.</p>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+//__DATA__
+</script>
+<script>
+//__APP__
+</script>
+</body>
+</html>
