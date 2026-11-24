@@ -1,0 +1,24 @@
+// Plasma: the classic demoscene effect.
+// Every pixel adds up a few sine waves; the sum picks a color.
+// Edit the numbers while it runs; it recompiles as you type.
+
+fn frame(t: float) {
+  for y in 0..HEIGHT {
+    for x in 0..WIDTH {
+      let u = x as float / 40.0;
+      let v = y as float / 40.0;
+
+      var s = sin(u + t);
+      s += sin((v + t) * 0.7);
+      s += sin((u + v + t * 0.6) * 0.8);
+      let cx = u + 2.0 * sin(t * 0.33);
+      let cy = v + 2.0 * cos(t * 0.5);
+      s += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
+
+      let r = 0.5 + 0.5 * sin(PI * s);
+      let g = 0.5 + 0.5 * sin(PI * s + 2.1);
+      let b = 0.5 + 0.5 * sin(PI * s + 4.2);
+      pixel(x, y, rgbf(r, g, b));
+    }
+  }
+}
