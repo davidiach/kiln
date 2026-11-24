@@ -99,7 +99,28 @@ class Parser {
     if (this.is('fn')) return this.fn(false, t);
     if (this.is('let') || this.is('var')) return this.global();
     if (this.is('const')) return this.constDecl();
-    throw this.error(`expected a function, 'let', 'var' or 'const' at top level, found ${this.describe(t)}`, t);
+    if (this.is('struct')) return this.structDecl();
+    throw this.error(`expected a function, 'struct', 'let', 'var' or 'const' at top level, found ${this.describe(t)}`, t);
+  }
+
+  structDecl() {
+    this.expect('struct');
+    const nameTok = this.ident('a struct name');
+    const open = this.peek();
+    if (this.is('(')) throw this.error(`struct fields go in braces: struct ${nameTok.text} { x: float, y: float }`);
+    this.expect('{', `after 'struct ${nameTok.text}'`);
+    const fields = [];
+    while (!this.is('}')) {
+      const fTok = this.ident('a field name');
+      this.expect(':', `after field '${fTok.text}' (fields need a type, like '${fTok.text}: float')`);
+      const type = this.type();
+      fields.push({ name: fTok.text, type, span: fTok });
+      if (this.is(';')) throw this.error("separate struct fields with ',' rather than ';'");
+      if (!this.eat(',')) break;
+    }
+    if (this.peek().kind === 'eof') throw this.error("unclosed struct: expected '}'", open);
+    this.expect('}', 'to close the struct');
+    return { kind: 'Struct', name: nameTok.text, nameSpan: nameTok, fields, span: nameTok };
   }
 
   fn(exported, startTok) {
@@ -208,13 +229,14 @@ class Parser {
     if (this.is('{')) return this.block();
     if (this.is('fn')) throw this.error('functions must be declared at top level, not inside other functions');
     if (this.is('const')) throw this.error("'const' declarations must be at top level; use 'let' inside functions");
+    if (this.is('struct')) throw this.error('structs must be declared at top level');
 
     const expr = this.expr();
     const opTok = this.peek();
     if (opTok.kind === 'punct' && ASSIGN_OPS.has(opTok.text)) {
       this.next();
-      if (expr.kind !== 'Ident' && expr.kind !== 'Index') {
-        throw new CompileError("can't assign to this expression", expr.span, 'only variables and array elements can be assigned');
+      if (expr.kind !== 'Ident' && expr.kind !== 'Index' && expr.kind !== 'Field') {
+        throw new CompileError("can't assign to this expression", expr.span, 'only variables, fields and array elements can be assigned');
       }
       const value = this.expr();
       this.expect(';', 'after assignment');
@@ -337,6 +359,10 @@ class Parser {
         const index = this.expr();
         const close = this.expect(']', 'to close the index');
         e = { kind: 'Index', target: e, index, span: join(e.span, close) };
+      } else if (this.is('.')) {
+        this.next();
+        const nameTok = this.ident('a field name');
+        e = { kind: 'Field', target: e, name: nameTok.text, nameSpan: nameTok, span: join(e.span, nameTok) };
       } else {
         return e;
       }

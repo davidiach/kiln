@@ -4,13 +4,18 @@
 // into a human-readable WAT listing that mirrors the binary 1:1. Only
 // functions reachable from main/frame/exports are emitted; everything else
 // (including unused prelude functions) is stripped.
+//
+// Structs are flattened into their scalar leaves (see types.js). A struct
+// value on the wasm stack is just its leaves in order, struct locals and
+// globals are runs of scalar locals/globals, functions take and return them
+// as multiple values, and arrays of structs are laid out in linear memory.
 
 import { ByteWriter, OPS, SECTION, I32, F64, VOID_BLOCK, valType, valTypeName, f64Text } from './wasm.js';
 import { IMPORTS } from './builtins.js';
+import { isStruct, leafTypes, numericKind, sizeOf } from './types.js';
 
 const textEncoder = new TextEncoder();
 const align = (n, a) => Math.ceil(n / a) * a;
-const elemSize = (t) => (t === 'float' ? 8 : 4);
 
 export function generate(checker, sources) {
   return new Generator(checker, sources).run();
@@ -57,31 +62,24 @@ class Generator {
     this.importByName = new Map(this.imports.map((i) => [i.name, i]));
     this.funcs.forEach((f, i) => (f.index = this.imports.length + i));
     this.globals = ck.globals.filter((g) => usedGlobals.has(g));
-    this.globals.forEach((g, i) => (g.index = i));
+    let globalLeaves = 0;
+    for (const g of this.globals) {
+      g.index = globalLeaves;
+      globalLeaves += leafTypes(g.type).length;
+    }
 
     // ---- linear memory layout: arrays first (prelude's `screen` lands at 0), then strings
     this.arrays = ck.arrays.filter((a) => usedArrays.has(a));
     let addr = 0;
+    const inits = [];
     for (const a of this.arrays) {
       a.addr = align(addr, 8);
-      addr = a.addr + a.size * elemSize(a.elem);
-      if (a.init && a.init.length) {
-        const w = new ByteWriter();
-        for (const v of a.init) {
-          if (a.elem === 'float') w.f64(v);
-          else {
-            const x = typeof v === 'boolean' ? +v : v;
-            w.u8(x).u8(x >> 8).u8(x >> 16).u8(x >> 24);
-          }
-        }
-        this.segments.push({ addr: a.addr, bytes: w.bytes, label: a.name });
-      }
+      addr = a.addr + a.size * sizeOf(a.elem);
+      if (a.init && a.init.length) inits.push(a);
     }
     this.dataEnd = addr;
+    for (const a of inits) this.segments.push({ addr: a.addr, bytes: this.encodeArray(a), label: a.name });
     const screen = this.arrays.find((a) => a.name === 'screen' && a.origin === 'prelude');
-
-    // String-typed globals need their literal interned before codegen.
-    for (const g of this.globals) if (g.type === 'str') g.addr = this.intern(g.value);
 
     // ---- function bodies
     const bodies = this.funcs.map((f) => {
@@ -90,25 +88,35 @@ class Generator {
       return fg;
     });
 
-    const memBytes = Math.max(this.dataEnd, 1);
-    const pages = Math.max(1, Math.ceil(memBytes / 65536));
+    // ---- globals: one wasm global per scalar leaf
+    const allGlobals = [];
+    for (const g of this.globals) {
+      const ls = leafTypes(g.type);
+      ls.forEach((t, i) => {
+        allGlobals.push({
+          name: isStruct(g.type) ? `${g.name}.${g.type.leafPaths[i]}` : g.name,
+          type: t,
+          mutable: true,
+          value: this.leafValue(t, isStruct(g.type) ? g.value[i] : g.value),
+        });
+      });
+    }
 
-    // ---- exports
     const exports = [{ name: 'memory', kind: 2, index: 0 }];
     for (const f of this.funcs) {
       if (f === ck.main || f === ck.frame || f.exported) exports.push({ name: f.name, kind: 0, index: f.index, fn: f });
     }
-    const extraGlobals = [];
     if (screen) {
-      extraGlobals.push({ name: '__screen', type: 'int', mutable: false, value: screen.addr });
-      exports.push({ name: '__screen', kind: 3, index: this.globals.length });
+      exports.push({ name: '__screen', kind: 3, index: allGlobals.length });
+      allGlobals.push({ name: '__screen', type: 'int', mutable: false, value: screen.addr });
     }
-    const allGlobals = [...this.globals.map((g) => ({ name: g.name, type: g.type, mutable: true, value: g.type === 'str' ? g.addr : g.value })), ...extraGlobals];
+
+    const memBytes = Math.max(this.dataEnd, 1);
+    const pages = Math.max(1, Math.ceil(memBytes / 65536));
 
     // ---- assemble the binary
-    const sigOf = (params, ret) => this.typeIndex(params, ret);
-    this.imports.forEach((im) => (im.type = sigOf(im.params, im.ret)));
-    this.funcs.forEach((f) => (f.typeIdx = sigOf(f.params.map((p) => p.type), f.ret)));
+    this.imports.forEach((im) => (im.type = this.typeIndex(im.params, im.ret === 'void' ? [] : [im.ret])));
+    this.funcs.forEach((f) => (f.typeIdx = this.typeIndex(f.params.flatMap((p) => leafTypes(p.type)), leafTypes(f.ret))));
 
     const sections = [];
     const mod = new ByteWriter();
@@ -126,7 +134,7 @@ class Generator {
       w.vec(this.types, (t) => {
         w.u8(0x60);
         w.vec(t.params, (p) => w.u8(valType(p)));
-        w.vec(t.ret === 'void' ? [] : [t.ret], (r) => w.u8(valType(r)));
+        w.vec(t.results, (r) => w.u8(valType(r)));
       }),
     );
     if (this.imports.length) {
@@ -143,7 +151,7 @@ class Generator {
         w.vec(allGlobals, (g) => {
           w.u8(valType(g.type)).u8(g.mutable ? 1 : 0);
           if (g.type === 'float') w.u8(0x44).f64(g.value);
-          else w.u8(0x41).s32(typeof g.value === 'boolean' ? +g.value : g.value);
+          else w.u8(0x41).s32(g.value);
           w.u8(0x0b);
         }),
       );
@@ -192,7 +200,6 @@ class Generator {
 
     const binary = mod.toUint8Array();
     const wat = this.wat(bodies, exports, allGlobals, pages);
-    const allFuncs = ck.funcs.length;
     return {
       binary,
       wat,
@@ -202,7 +209,7 @@ class Generator {
       stats: {
         bytes: binary.length,
         functions: this.funcs.length,
-        stripped: allFuncs - this.funcs.length,
+        stripped: ck.funcs.length - this.funcs.length,
         imports: this.imports.map((i) => i.name),
         memoryPages: pages,
         dataBytes: this.dataEnd,
@@ -210,15 +217,40 @@ class Generator {
     };
   }
 
-  typeIndex(params, ret) {
-    const key = params.map(valType).join(',') + '->' + (ret === 'void' ? '' : valType(ret));
+  typeIndex(params, results) {
+    const key = params.map(valType).join(',') + '->' + results.map(valType).join(',');
     let idx = this.typeKeys.get(key);
     if (idx === undefined) {
       idx = this.types.length;
-      this.types.push({ params, ret, key });
+      this.types.push({ params, results, key });
       this.typeKeys.set(key, idx);
     }
     return idx;
+  }
+
+  /** The i32/f64 a scalar constant becomes. */
+  leafValue(type, v) {
+    if (type === 'float') return v;
+    if (type === 'str') return this.intern(v);
+    return typeof v === 'boolean' ? +v : v;
+  }
+
+  encodeArray(a) {
+    const size = sizeOf(a.elem);
+    const bytes = new Uint8Array(a.init.length * size);
+    const view = new DataView(bytes.buffer);
+    const types = leafTypes(a.elem);
+    const offsets = isStruct(a.elem) ? a.elem.leafOffsets : [0];
+    a.init.forEach((v, i) => {
+      const vals = isStruct(a.elem) ? v : [v];
+      types.forEach((t, j) => {
+        const off = i * size + offsets[j];
+        const x = this.leafValue(t, vals[j]);
+        if (t === 'float') view.setFloat64(off, x, true);
+        else view.setInt32(off, x, true);
+      });
+    });
+    return [...bytes];
   }
 
   /** Strings live in linear memory as [len: i32][utf-8 bytes]. */
@@ -244,12 +276,14 @@ class Generator {
   wat(bodies, exports, globals, pages) {
     const out = ['(module'];
     const vt = (t) => valTypeName(valType(t));
-    const sig = (params, ret, names) =>
-      params.map((p, i) => ` (param${names ? ' $' + names[i] : ''} ${vt(p)})`).join('') + (ret === 'void' ? '' : ` (result ${vt(ret)})`);
-    for (const im of this.imports) out.push(`  (import "env" "${im.name}" (func $${im.name}${sig(im.params, im.ret)}))`);
+    const results = (ts) => (ts.length ? ` (result ${ts.map(vt).join(' ')})` : '');
+    for (const im of this.imports) {
+      const params = im.params.map((p) => ` (param ${vt(p)})`).join('');
+      out.push(`  (import "env" "${im.name}" (func $${im.name}${params}${results(im.ret === 'void' ? [] : [im.ret])}))`);
+    }
     out.push(`  (memory (export "memory") ${pages})`);
     for (const g of globals) {
-      const init = g.type === 'float' ? `f64.const ${f64Text(g.value)}` : `i32.const ${typeof g.value === 'boolean' ? +g.value : g.value}`;
+      const init = g.type === 'float' ? `f64.const ${f64Text(g.value)}` : `i32.const ${g.value}`;
       const ty = g.mutable ? `(mut ${vt(g.type)})` : vt(g.type);
       const ex = g.name === '__screen' ? ` (export "__screen")` : '';
       out.push(`  (global $${g.name}${ex} ${ty} (${init}))`);
@@ -258,11 +292,13 @@ class Generator {
       const f = fg.sym;
       const ex = exports.find((e) => e.fn === f);
       const exText = ex ? ` (export "${f.name}")` : '';
+      const np = f.paramLeafCount;
+      const params = fg.localTypes.slice(0, np).map((t, i) => ` (param $${fg.localNames[i]} ${vt(t)})`).join('');
       out.push('');
-      out.push(`  (func $${f.name}${exText}${sig(f.params.map((p) => p.type), f.ret, fg.localNames)}`);
-      const locals = fg.localTypes.slice(f.params.length);
+      out.push(`  (func $${f.name}${exText}${params}${results(leafTypes(f.ret))}`);
+      const locals = fg.localTypes.slice(np);
       if (locals.length) {
-        const decl = locals.map((t, i) => `(local $${fg.localNames[f.params.length + i]} ${vt(t)})`);
+        const decl = locals.map((t, i) => `(local $${fg.localNames[np + i]} ${vt(t)})`);
         for (let i = 0; i < decl.length; i += 4) out.push('    ' + decl.slice(i, i + 4).join(' '));
       }
       out.push(...fg.lines);
@@ -311,7 +347,7 @@ class FnGen {
 
   localGroups() {
     const groups = [];
-    for (const t of this.localTypes.slice(this.sym.params.length)) {
+    for (const t of this.localTypes.slice(this.sym.paramLeafCount)) {
       const last = groups[groups.length - 1];
       if (last && last[1] === t) last[0]++;
       else groups.push([1, t]);
@@ -334,8 +370,14 @@ class FnGen {
       switch (part) {
         case 'block': {
           const bt = args[0];
-          this.code.u8(bt);
-          if (bt !== VOID_BLOCK) text += ` (result ${valTypeName(bt)})`;
+          if (typeof bt === 'object') {
+            // multi-value block: refers to a function type with no params
+            this.code.s32(bt.typeIndex);
+            text += ` (result ${bt.results.map((r) => valTypeName(valType(r))).join(' ')})`;
+          } else {
+            this.code.u8(bt);
+            if (bt !== VOID_BLOCK) text += ` (result ${valTypeName(bt)})`;
+          }
           break;
         }
         case 'label':
@@ -404,6 +446,14 @@ class FnGen {
     this.emit('br_if', this.depthOf(label), note);
   }
 
+  /** Block type for a value of `type`: none, one value, or several (multi-value). */
+  blockType(type) {
+    const ls = leafTypes(type);
+    if (ls.length === 0) return VOID_BLOCK;
+    if (ls.length === 1) return valType(ls[0]);
+    return { typeIndex: this.gen.typeIndex([], ls), results: ls };
+  }
+
   temp(type) {
     const kind = type === 'float' ? 'f64' : 'i32';
     if (this.free[kind].length) return this.free[kind].pop();
@@ -414,6 +464,22 @@ class FnGen {
   }
   release(...idxs) {
     for (const idx of idxs) this.free[this.localTypes[idx] === 'float' ? 'f64' : 'i32'].push(idx);
+  }
+
+  /** Pop a value of `type` off the stack into fresh temps (one per leaf). */
+  spill(type) {
+    const temps = leafTypes(type).map((t) => this.temp(t));
+    for (let i = temps.length - 1; i >= 0; i--) this.emit('local.set', temps[i]);
+    return { locals: temps, temps };
+  }
+
+  /** Make the leaves of `e` available in locals; struct locals are used in place. */
+  materialize(e) {
+    if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local') {
+      return { locals: leafTypes(e.type).map((_, i) => e.sym.index + i), temps: [] };
+    }
+    this.expr(e);
+    return this.spill(e.type);
   }
 
   callImport(name) {
@@ -429,6 +495,98 @@ class FnGen {
     this.emit('unreachable');
   }
 
+  load(type, offset) {
+    if (type === 'float') this.emit('f64.load', 3, offset);
+    else this.emit('i32.load', 2, offset);
+  }
+
+  store(type, offset) {
+    if (type === 'float') this.emit('f64.store', 3, offset);
+    else this.emit('i32.store', 2, offset);
+  }
+
+  globalLeaf(sym, i) {
+    return { index: sym.index + i, name: isStruct(sym.type) ? `${sym.name}.${sym.type.leafPaths[i]}` : sym.name };
+  }
+
+  // ---------------------------------------------------------------- places
+  //
+  // A place is somewhere a value lives: a run of locals, a run of globals, or
+  // a spot in linear memory (base address in a temp + a static offset).
+  // Field access on a place just narrows it, without loading anything else.
+
+  place(e) {
+    switch (e.kind) {
+      case 'Ident': {
+        const s = e.sym;
+        if (s.kind === 'local') return { kind: 'local', base: s.index, type: e.type, temps: [] };
+        if (s.kind === 'global') return { kind: 'global', sym: s, leaf: 0, type: e.type, temps: [] };
+        return null;
+      }
+      case 'Field': {
+        const p = this.place(e.target);
+        if (!p) return null;
+        const S = e.target.type;
+        const i = e.fieldIndex;
+        const type = S.fields[i].type;
+        if (p.kind === 'local') return { ...p, base: p.base + S.fieldLeaf[i], type };
+        if (p.kind === 'global') return { ...p, leaf: p.leaf + S.fieldLeaf[i], type };
+        return { ...p, offset: p.offset + S.fieldOffset[i], type };
+      }
+      case 'Index': {
+        if (e.indexKind !== 'array') return null;
+        const arr = e.sym;
+        const c = e.index.constValue;
+        if (c !== undefined && c >= 0 && c < arr.size) {
+          return { kind: 'mem', dyn: null, offset: arr.addr + c * sizeOf(arr.elem), type: arr.elem, temps: [] };
+        }
+        const t = this.temp('int');
+        this.arrayOffset(e);
+        this.emit('local.set', t);
+        return { kind: 'mem', dyn: t, offset: arr.addr, type: arr.elem, temps: [t] };
+      }
+    }
+    return null;
+  }
+
+  leafOffset(p, i) {
+    return p.offset + (isStruct(p.type) ? p.type.leafOffsets[i] : 0);
+  }
+
+  memBase(p) {
+    if (p.dyn === null) this.emit('i32.const', 0);
+    else this.emit('local.get', p.dyn);
+  }
+
+  loadPlace(p) {
+    leafTypes(p.type).forEach((t, i) => {
+      if (p.kind === 'local') this.emit('local.get', p.base + i);
+      else if (p.kind === 'global') this.emit('global.get', this.globalLeaf(p.sym, p.leaf + i));
+      else {
+        this.memBase(p);
+        this.load(t, this.leafOffset(p, i));
+      }
+    });
+  }
+
+  /** Store the value on top of the stack into the place. */
+  storePlace(p) {
+    const ls = leafTypes(p.type);
+    if (p.kind === 'local') {
+      for (let i = ls.length - 1; i >= 0; i--) this.emit('local.set', p.base + i);
+    } else if (p.kind === 'global') {
+      for (let i = ls.length - 1; i >= 0; i--) this.emit('global.set', this.globalLeaf(p.sym, p.leaf + i));
+    } else {
+      const v = this.spill(p.type);
+      ls.forEach((t, i) => {
+        this.memBase(p);
+        this.emit('local.get', v.locals[i]);
+        this.store(t, this.leafOffset(p, i));
+      });
+      this.release(...v.temps);
+    }
+  }
+
   // ----------------------------------------------------------- statements
 
   block(b) {
@@ -438,11 +596,13 @@ class FnGen {
   stmt(s) {
     if (s.kind !== 'Block') this.lineComment(s.span);
     switch (s.kind) {
-      case 'Let':
+      case 'Let': {
+        const type = s.sym.type;
         if (s.init) this.expr(s.init);
-        else this.zero(s.sym.type);
-        this.emit('local.set', s.sym.index);
+        else leafTypes(type).forEach((t) => this.zero(t));
+        for (let i = leafTypes(type).length - 1; i >= 0; i--) this.emit('local.set', s.sym.index + i);
         return;
+      }
       case 'Assign':
         return this.assign(s);
       case 'If': {
@@ -527,7 +687,7 @@ class FnGen {
       case 'ExprStmt':
         if (s.expr.constValue !== undefined) return; // no side effects
         this.expr(s.expr);
-        if (s.expr.type !== 'void') this.emit('drop');
+        for (let i = 0; i < leafTypes(s.expr.type).length; i++) this.emit('drop');
         return;
       case 'Block':
         this.block(s);
@@ -539,36 +699,39 @@ class FnGen {
   assign(s) {
     const t = s.target;
     const type = s.targetType;
-    if (t.kind === 'Ident') {
-      const sym = t.sym;
-      if (s.op !== '=') this.loadVar(sym);
-      this.expr(s.value);
-      if (s.op !== '=') this.binop(s.op, type, s);
-      if (sym.kind === 'local') this.emit('local.set', sym.index);
-      else this.emit('global.set', sym);
+    const compound = s.op !== '=';
+
+    // Fast path: scalar element of a scalar array. The address goes on the
+    // stack first, so no temps are needed for a plain store.
+    if (t.kind === 'Index' && t.indexKind === 'array' && !isStruct(type)) {
+      const arr = t.sym;
+      this.arrayOffset(t);
+      if (compound) {
+        const off = this.temp('int');
+        this.emit('local.tee', off);
+        this.emit('local.get', off);
+        this.release(off);
+        this.load(arr.elem, arr.addr);
+        this.expr(s.value);
+        this.binop(s.op, type, s);
+      } else {
+        this.expr(s.value);
+      }
+      this.store(arr.elem, arr.addr);
       return;
     }
-    // array element
-    const arr = t.sym;
-    this.arrayOffset(t);
-    if (s.op !== '=') {
-      const off = this.temp('int');
-      this.emit('local.tee', off);
-      this.emit('local.get', off);
-      this.release(off);
-      this.arrayLoad(arr);
+
+    // Everything else: variables, fields, struct elements.
+    const p = this.place(t);
+    if (compound) {
+      this.loadPlace(p);
       this.expr(s.value);
-      this.binop(s.op, type, s);
+      this.binopStack(s.op, type, s.value.type, s);
     } else {
       this.expr(s.value);
     }
-    if (arr.elem === 'float') this.emit('f64.store', 3, arr.addr);
-    else this.emit('i32.store', 2, arr.addr);
-  }
-
-  loadVar(sym) {
-    if (sym.kind === 'local') this.emit('local.get', sym.index);
-    else this.emit('global.get', sym);
+    this.storePlace(p);
+    this.release(...p.temps);
   }
 
   zero(type) {
@@ -577,18 +740,21 @@ class FnGen {
   }
 
   constant(type, v) {
+    if (isStruct(type)) {
+      type.leafTypes.forEach((t, i) => this.constant(t, v[i]));
+      return;
+    }
     if (type === 'float') this.emit('f64.const', v);
-    else if (type === 'str') this.emit('i32.const', this.gen.intern(v));
-    else this.emit('i32.const', typeof v === 'boolean' ? +v : v);
+    else this.emit('i32.const', this.gen.leafValue(type, v));
   }
 
-  /** Leaves the byte offset (index << log2(size)) on the stack, after a bounds check. */
+  /** Leaves the byte offset (index * element size) on the stack, after a bounds check. */
   arrayOffset(e) {
     const arr = e.sym;
-    const shift = arr.elem === 'float' ? 3 : 2;
+    const size = sizeOf(arr.elem);
     const c = e.index.constValue;
     if (c !== undefined && c >= 0 && c < arr.size) {
-      this.emit('i32.const', c << shift);
+      this.emit('i32.const', c * size);
       return;
     }
     const idx = this.temp('int');
@@ -600,14 +766,14 @@ class FnGen {
     this.trap({ kind: 'index', name: arr.name, size: arr.size, line: e.span.line, col: e.span.col }, idx);
     this.close();
     this.emit('local.get', idx);
-    this.emit('i32.const', shift);
-    this.emit('i32.shl');
+    if ((size & (size - 1)) === 0) {
+      this.emit('i32.const', Math.log2(size));
+      this.emit('i32.shl');
+    } else {
+      this.emit('i32.const', size);
+      this.emit('i32.mul');
+    }
     this.release(idx);
-  }
-
-  arrayLoad(arr) {
-    if (arr.elem === 'float') this.emit('f64.load', 3, arr.addr);
-    else this.emit('i32.load', 2, arr.addr);
   }
 
   // ---------------------------------------------------------- expressions
@@ -616,17 +782,28 @@ class FnGen {
     if (e.constValue !== undefined && e.type !== 'void') return this.constant(e.type, e.constValue);
     switch (e.kind) {
       case 'Ident':
-        return this.loadVar(e.sym);
+      case 'Field': {
+        const p = this.place(e);
+        if (p) {
+          this.loadPlace(p);
+          this.release(...p.temps);
+          return;
+        }
+        // Field of a temporary (e.g. f().x): evaluate it all, keep the part we need.
+        const v = this.materialize(e.target);
+        const S = e.target.type;
+        const start = S.fieldLeaf[e.fieldIndex];
+        leafTypes(e.type).forEach((_, i) => this.emit('local.get', v.locals[start + i]));
+        this.release(...v.temps);
+        return;
+      }
       case 'Unary':
-        if (e.op === '-') {
-          if (e.type === 'float') {
-            this.expr(e.operand);
-            this.emit('f64.neg');
-          } else {
-            this.emit('i32.const', 0);
-            this.expr(e.operand);
-            this.emit('i32.sub');
-          }
+        if (isStruct(e.type)) {
+          const v = this.materialize(e.operand);
+          for (const [i, t] of e.type.leafTypes.entries()) this.negate(t, () => this.emit('local.get', v.locals[i]));
+          this.release(...v.temps);
+        } else if (e.op === '-') {
+          this.negate(e.type, () => this.expr(e.operand));
         } else if (e.op === '!') {
           this.expr(e.operand);
           this.emit('i32.eqz');
@@ -655,6 +832,14 @@ class FnGen {
           this.close();
           return;
         }
+        if (isStruct(e.left.type) || isStruct(e.right.type)) {
+          const A = this.materialize(e.left);
+          const B = this.materialize(e.right);
+          if (e.op === '==' || e.op === '!=') this.structEquals(e.op, e.left.type, A, B);
+          else this.componentwise(e.op, e.left.type, e.right.type, A, B, e);
+          this.release(...A.temps, ...B.temps);
+          return;
+        }
         this.expr(e.left);
         this.expr(e.right);
         this.binop(e.op, e.left.type, e);
@@ -665,7 +850,7 @@ class FnGen {
         return;
       case 'Ternary':
         this.expr(e.cond);
-        this.open('if', valType(e.type));
+        this.open('if', this.blockType(e.type));
         this.expr(e.then);
         this.emit('else');
         this.expr(e.else);
@@ -675,8 +860,14 @@ class FnGen {
         return this.call(e);
       case 'Index':
         if (e.indexKind === 'array') {
-          this.arrayOffset(e);
-          this.arrayLoad(e.sym);
+          if (isStruct(e.type)) {
+            const p = this.place(e);
+            this.loadPlace(p);
+            this.release(...p.temps);
+          } else {
+            this.arrayOffset(e);
+            this.load(e.sym.elem, e.sym.addr);
+          }
         } else {
           const s = this.temp('int');
           const i = this.temp('int');
@@ -699,6 +890,47 @@ class FnGen {
         return;
     }
     throw new Error(`codegen: unknown expression ${e.kind}`);
+  }
+
+  negate(type, push) {
+    if (type === 'float') {
+      push();
+      this.emit('f64.neg');
+    } else {
+      this.emit('i32.const', 0);
+      push();
+      this.emit('i32.sub');
+    }
+  }
+
+  /** Component-wise arithmetic; A and B hold the operands' leaves (one leaf if scalar). */
+  componentwise(op, lt, rt, A, B, node) {
+    const S = isStruct(lt) ? lt : rt;
+    const kind = numericKind(S);
+    for (let i = 0; i < S.leafTypes.length; i++) {
+      this.emit('local.get', A.locals[isStruct(lt) ? i : 0]);
+      this.emit('local.get', B.locals[isStruct(rt) ? i : 0]);
+      this.binop(op, kind, node);
+    }
+  }
+
+  structEquals(op, S, A, B) {
+    S.leafTypes.forEach((t, i) => {
+      this.emit('local.get', A.locals[i]);
+      this.emit('local.get', B.locals[i]);
+      this.emit(t === 'float' ? 'f64.eq' : 'i32.eq');
+      if (i > 0) this.emit('i32.and');
+    });
+    if (op === '!=') this.emit('i32.eqz');
+  }
+
+  /** Binary operator on two values already on the stack (used by compound assignment). */
+  binopStack(op, lt, rt, node) {
+    if (!isStruct(lt) && !isStruct(rt)) return this.binop(op, lt, node);
+    const B = this.spill(rt);
+    const A = this.spill(lt);
+    this.componentwise(op, lt, rt, A, B, node);
+    this.release(...A.temps, ...B.temps);
   }
 
   binop(op, type, node) {
@@ -773,6 +1005,11 @@ class FnGen {
   }
 
   call(e) {
+    if (e.ctor) {
+      // A struct value *is* its fields' leaves, in order: construction is free.
+      for (const a of e.args) this.expr(a);
+      return;
+    }
     if (e.sym) {
       for (const a of e.args) this.expr(a);
       this.emit('call', e.sym);
@@ -780,10 +1017,10 @@ class FnGen {
     }
     switch (e.builtin) {
       case 'print':
-        for (const a of e.args) {
-          this.expr(a);
-          this.callImport(`__print_${a.type[0]}`);
-        }
+        e.args.forEach((a, i) => {
+          if (i) this.printText(' ');
+          this.printValue(a);
+        });
         this.callImport('__print_end');
         return;
       case 'select':
@@ -804,6 +1041,39 @@ class FnGen {
         return this.intrinsic(e);
     }
     throw new Error(`codegen: unknown call ${e.callee}`);
+  }
+
+  printText(s) {
+    this.emit('i32.const', this.gen.intern(s));
+    this.callImport('__print_s');
+  }
+
+  printValue(a) {
+    if (!isStruct(a.type)) {
+      this.expr(a);
+      this.callImport(`__print_${a.type[0]}`);
+      return;
+    }
+    const v = this.materialize(a);
+    this.printStruct(a.type, v.locals, 0);
+    this.release(...v.temps);
+  }
+
+  /** Prints like the constructor call that would make it: Vec3(1.0, 2.0, 3.0) */
+  printStruct(S, locals, start) {
+    this.printText(`${S.name}(`);
+    let k = start;
+    S.fields.forEach((f, i) => {
+      if (i) this.printText(', ');
+      if (isStruct(f.type)) {
+        this.printStruct(f.type, locals, k);
+        k += f.type.leafTypes.length;
+      } else {
+        this.emit('local.get', locals[k++]);
+        this.callImport(`__print_${f.type[0]}`);
+      }
+    });
+    this.printText(')');
   }
 
   intrinsic(e) {

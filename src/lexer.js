@@ -7,7 +7,7 @@ import { CompileError } from './errors.js';
 
 export const KEYWORDS = new Set([
   'fn', 'let', 'var', 'const', 'if', 'else', 'while', 'for', 'in',
-  'break', 'continue', 'return', 'true', 'false', 'as', 'export',
+  'break', 'continue', 'return', 'true', 'false', 'as', 'export', 'struct',
 ]);
 
 // Longest first, so that '>>>=' wins over '>>>' wins over '>>' wins over '>'.
@@ -16,7 +16,7 @@ const PUNCT = [
   '..', '->', '&&', '||', '==', '!=', '<=', '>=', '<<', '>>',
   '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=',
   '+', '-', '*', '/', '%', '&', '|', '^', '~', '!', '<', '>', '=',
-  '(', ')', '{', '}', '[', ']', ',', ':', ';', '?',
+  '(', ')', '{', '}', '[', ']', ',', ':', ';', '?', '.',
 ];
 
 const isDigit = (c) => c >= '0' && c <= '9';

@@ -9,6 +9,7 @@
 
 import { CompileError, suggest } from './errors.js';
 import { INTRINSICS, IMPORTS, SPECIAL, FOLDABLE, nearest, isBuiltinName, signatureText } from './builtins.js';
+import { isStruct, leafTypes, leafCount, numericKind, layoutStruct } from './types.js';
 
 const SCALARS = ['int', 'float', 'bool', 'str'];
 const ARITH = new Set(['+', '-', '*', '/', '%']);
@@ -40,6 +41,7 @@ class Checker {
     this.globals = [];
     this.arrays = [];
     this.consts = [];
+    this.structs = [];
     this.fn = null;
     this.scopes = [];
     this.loops = 0;
@@ -58,6 +60,14 @@ class Checker {
     for (const { ast, origin } of units) {
       this.origin = origin;
       for (const item of ast.items) this.declare(item, origin);
+    }
+    for (const s of this.structs) {
+      this.origin = s.origin;
+      this.resolveStruct(s);
+    }
+    for (const f of this.funcs) {
+      this.origin = f.origin;
+      this.resolveSignature(f);
     }
     for (const sym of this.top.values()) {
       this.origin = sym.origin;
@@ -93,16 +103,17 @@ class Checker {
       sym = {
         kind: 'func', name, decl: item, origin, exported: item.exported,
         calls: new Set(), imports: new Set(), globals: new Set(), arrays: new Set(),
-        locals: [], params: [], ret: 'void',
+        locals: [], params: [], ret: 'void', paramLeafCount: 0,
       };
-      const seen = new Set();
-      for (const p of item.params) {
-        if (seen.has(p.name)) this.err(`parameter '${p.name}' is declared twice`, p.span);
-        seen.add(p.name);
-        sym.params.push({ name: p.name, type: this.scalarType(p.type) });
-      }
-      sym.ret = item.ret ? this.scalarType(item.ret) : 'void';
       this.funcs.push(sym);
+    } else if (item.kind === 'Struct') {
+      sym = {
+        kind: 'struct', name, decl: item, origin, fields: [], state: 'pending',
+        toString() {
+          return this.name;
+        },
+      };
+      this.structs.push(sym);
     } else if (item.kind === 'Const' || (item.kind === 'Global' && !item.mutable && !isArrayDecl(item))) {
       // Top-level `let` is a named constant.
       sym = { kind: 'const', name, decl: item, origin, state: 'pending', type: 'error', value: undefined, untyped: false };
@@ -117,15 +128,52 @@ class Checker {
     this.top.set(name, sym);
   }
 
-  scalarType(node) {
+  /** Resolve a type annotation to a scalar type name or a struct symbol. */
+  valueType(node, inStruct = false) {
     if (node.kind === 'ArrayType') {
-      this.err('array types are only allowed for top-level variables', node.span, 'declare the array outside of any function');
+      if (inStruct) this.err("struct fields can't be arrays", node.span, 'use an array of structs instead: var items: [Item; 16];');
+      else this.err('array types are only allowed for top-level variables', node.span, 'declare the array outside of any function');
       return 'error';
     }
     if (SCALARS.includes(node.name)) return node.name;
-    const s = suggest(node.name, SCALARS);
-    this.err(`unknown type '${node.name}'`, node.span, s ? `did you mean '${s}'?` : `types are: ${SCALARS.join(', ')}`);
+    const sym = this.top.get(node.name);
+    if (sym && sym.kind === 'struct') return this.resolveStruct(sym) ? sym : 'error';
+    const names = [...SCALARS, ...this.structs.map((s) => s.name)];
+    const s = suggest(node.name, names);
+    this.err(`unknown type '${node.name}'`, node.span, s ? `did you mean '${s}'?` : `types are: ${names.join(', ')}`);
     return 'error';
+  }
+
+  resolveStruct(s) {
+    if (s.state === 'done') return true;
+    if (s.state === 'busy') {
+      this.err(`struct '${s.name}' contains itself`, s.decl.nameSpan, "a struct can't contain itself, directly or through another struct");
+      return false;
+    }
+    s.state = 'busy';
+    const save = this.origin;
+    this.origin = s.origin;
+    const seen = new Set();
+    if (!s.decl.fields.length) this.err(`struct '${s.name}' needs at least one field`, s.decl.nameSpan);
+    for (const f of s.decl.fields) {
+      if (seen.has(f.name)) this.err(`field '${f.name}' is declared twice`, f.span);
+      seen.add(f.name);
+      s.fields.push({ name: f.name, type: this.valueType(f.type, true) });
+    }
+    layoutStruct(s);
+    s.state = 'done';
+    this.origin = save;
+    return true;
+  }
+
+  resolveSignature(f) {
+    const seen = new Set();
+    for (const p of f.decl.params) {
+      if (seen.has(p.name)) this.err(`parameter '${p.name}' is declared twice`, p.span);
+      seen.add(p.name);
+      f.params.push({ name: p.name, type: this.valueType(p.type) });
+    }
+    f.ret = f.decl.ret ? this.valueType(f.decl.ret) : 'void';
   }
 
   inConstContext(origin, f) {
@@ -156,7 +204,7 @@ class Checker {
         return;
       }
       let t = this.expr(d.init);
-      if (d.type) t = this.coerce(d.init, t, this.scalarType(d.type), `constant '${sym.name}'`);
+      if (d.type) t = this.coerce(d.init, t, this.valueType(d.type), `constant '${sym.name}'`);
       if (t === 'void') {
         this.err(`constant '${sym.name}' has no value`, d.init.span);
         t = 'error';
@@ -175,7 +223,7 @@ class Checker {
   resolveGlobal(sym) {
     this.inConstContext(sym.origin, () => {
       const d = sym.decl;
-      let t = d.type ? this.scalarType(d.type) : null;
+      let t = d.type ? this.valueType(d.type) : null;
       if (d.init) {
         const it = this.expr(d.init);
         t = t ? this.coerce(d.init, it, t, `global '${sym.name}'`) : it;
@@ -188,7 +236,7 @@ class Checker {
         this.err(`global '${sym.name}' needs a type or a value`, d.span, `e.g. 'var ${sym.name}: int;' or 'var ${sym.name} = 0;'`);
         t = 'error';
       } else {
-        sym.value = t === 'float' ? 0 : t === 'bool' ? false : t === 'str' ? '' : 0;
+        sym.value = zeroValue(t);
       }
       if (t === 'void') t = 'error';
       sym.type = t;
@@ -205,7 +253,7 @@ class Checker {
           this.err(`'${sym.name}' is initialized with an array but declared as ${d.type.name}`, d.type.span, `write the type as [${d.type.name}; N]`);
           return;
         }
-        elem = this.scalarType(d.type.elem);
+        elem = this.valueType(d.type.elem);
         if (elem === 'str') {
           this.err('arrays of strings are not supported', d.type.elem.span);
           elem = 'error';
@@ -234,7 +282,7 @@ class Checker {
         }
         const types = els.map((e) => this.expr(e));
         if (!elem) {
-          elem = types.includes('float') ? 'float' : types[0];
+          elem = types.includes('float') && !types.some(isStruct) ? 'float' : types[0];
           if (elem === 'str') {
             this.err('arrays of strings are not supported', d.init.span);
             return;
@@ -250,7 +298,7 @@ class Checker {
         else if (els.length > size) this.err(`array '${sym.name}' has room for ${size} elements but ${els.length} were given`, d.init.span);
       }
       if (elem === 'error' || elem === null || size === null) return;
-      const bytes = size * (elem === 'float' ? 8 : 4);
+      const bytes = size * (isStruct(elem) ? elem.size : elem === 'float' ? 8 : 4);
       if (bytes > MAX_MEMORY) {
         this.err(`array '${sym.name}' is too large (${bytes} bytes; the limit is ${MAX_MEMORY})`, d.span);
         return;
@@ -290,9 +338,10 @@ class Checker {
     this.scopes = [new Map()];
     this.loops = 0;
     sym.decl.params.forEach((p, i) => this.declareLocal(p.name, sym.params[i].type, false, false));
+    sym.paramLeafCount = sym.locals.length;
     this.block(sym.decl.body);
     if (sym.ret !== 'void' && sym.ret !== 'error' && !returns(sym.decl.body)) {
-      this.err(`function '${sym.name}' must return a ${sym.ret} on every path`, sym.decl.endSpan,
+      this.err(`function '${sym.name}' must return ${article(sym.ret)} on every path`, sym.decl.endSpan,
         `add 'return <${sym.ret}>;' before the closing brace`);
     }
     this.fn = null;
@@ -300,7 +349,9 @@ class Checker {
 
   declareLocal(name, type, mutable, loopVar) {
     const sym = { kind: 'local', name, type, mutable, loopVar, index: this.fn.locals.length };
-    this.fn.locals.push({ name, type });
+    // A struct local occupies one wasm local per leaf: v.x, v.y, v.z ...
+    if (isStruct(type)) type.leafTypes.forEach((t, i) => this.fn.locals.push({ name: `${name}.${type.leafPaths[i]}`, type: t }));
+    else this.fn.locals.push({ name, type });
     this.scopes[this.scopes.length - 1].set(name, sym);
     return sym;
   }
@@ -344,7 +395,7 @@ class Checker {
       case 'Let': {
         let t;
         if (s.type) {
-          t = this.scalarType(s.type);
+          t = this.valueType(s.type);
           if (s.init) this.coerce(s.init, this.expr(s.init), t, `'${s.name}'`);
           else if (!s.mutable) this.err(`'let ${s.name}' needs a value`, s.span, `use 'var ${s.name}: ${t};' for a variable that starts at zero`);
         } else if (s.init) {
@@ -402,7 +453,7 @@ class Checker {
             this.coerce(s.value, t, ret, 'return value');
           }
         } else if (ret !== 'void' && ret !== 'error') {
-          this.err(`'${this.fn.name}' must return a ${ret}`, s.span);
+          this.err(`'${this.fn.name}' must return ${article(ret)}`, s.span);
         }
         return;
       }
@@ -442,12 +493,7 @@ class Checker {
       tgt.type = targetType;
     } else {
       targetType = this.expr(tgt);
-      if (tgt.indexKind === 'str') {
-        this.err('strings are immutable', tgt.span);
-        targetType = 'error';
-      } else if (tgt.indexKind === 'array' && !tgt.sym.mutable) {
-        this.err(`can't modify '${tgt.sym.name}' because it was declared with 'let'`, tgt.span, `declare it with 'var ${tgt.sym.name}' to make it mutable`);
-      }
+      if (targetType !== 'error' && !this.assignable(tgt)) targetType = 'error';
     }
     s.targetType = targetType;
     const vt = this.expr(s.value);
@@ -461,6 +507,37 @@ class Checker {
       }
       s.checkZero = fake.checkZero;
     }
+  }
+
+  /** Can this element/field chain be assigned to? Reports why not. */
+  assignable(tgt) {
+    let root = tgt;
+    while (root.kind === 'Field') root = root.target;
+    const what = describeTarget(tgt);
+    if (root.kind === 'Index') {
+      if (root.indexKind === 'str') {
+        this.err('strings are immutable', tgt.span);
+        return false;
+      }
+      if (root.indexKind === 'array' && !root.sym.mutable) {
+        this.err(`can't modify '${what}' because '${root.sym.name}' was declared with 'let'`, tgt.span, `declare it with 'var ${root.sym.name}' to make it mutable`);
+        return false;
+      }
+      return true;
+    }
+    if (root.kind === 'Ident' && root.sym) {
+      const sym = root.sym;
+      if (sym.kind === 'global') return true;
+      if (sym.kind === 'local' && sym.mutable && !sym.loopVar) return true;
+      if (sym.kind === 'local') {
+        this.err(`can't modify '${what}' because '${sym.name}' is immutable`, tgt.span, `declare it with 'var ${sym.name}' to make it mutable`);
+      } else {
+        this.err(`can't modify '${what}' because '${sym.name}' is a constant`, tgt.span);
+      }
+      return false;
+    }
+    this.err(`can't assign to a field of a temporary value`, tgt.span, 'store it in a variable first');
+    return false;
   }
 
   // ------------------------------------------------------------- expressions
@@ -515,13 +592,16 @@ class Checker {
           case 'func':
             this.err(`'${sym.name}' is a function; call it like ${sym.name}(...)`, e.span);
             return 'error';
+          case 'struct':
+            this.err(`'${sym.name}' is a struct type; create a value like ${sym.name}(${sym.fields.map((f) => f.name).join(', ')})`, e.span);
+            return 'error';
         }
         return 'error';
       }
       case 'Unary': {
         const t = this.expr(e.operand);
         if (t === 'error') return t;
-        if (e.op === '-' && (t === 'int' || t === 'float')) return t;
+        if (e.op === '-' && (t === 'int' || t === 'float' || numericKind(t))) return t;
         if (e.op === '!' && t === 'bool') return t;
         if (e.op === '~' && t === 'int') return t;
         const hint = e.op === '!' && t === 'int' ? "for ints use '~' (bitwise not) or compare with '== 0'" : undefined;
@@ -535,9 +615,9 @@ class Checker {
       }
       case 'Cast': {
         const from = this.expr(e.expr);
-        const to = this.scalarType(e.to);
+        const to = this.valueType(e.to);
         if (from === 'error' || to === 'error') return 'error';
-        if (from === 'str' || to === 'str' || from === 'void') {
+        if (from === 'str' || to === 'str' || from === 'void' || isStruct(from) || isStruct(to)) {
           this.err(`can't convert ${from} to ${to}`, e.span);
           return 'error';
         }
@@ -557,16 +637,29 @@ class Checker {
       }
       case 'Call':
         return this.call(e);
+      case 'Field': {
+        const t = this.expr(e.target);
+        if (t === 'error') return t;
+        if (!isStruct(t)) {
+          this.err(`${t} values don't have fields`, e.nameSpan);
+          return 'error';
+        }
+        const i = t.fields.findIndex((f) => f.name === e.name);
+        if (i < 0) {
+          const names = t.fields.map((f) => f.name);
+          const s = suggest(e.name, names);
+          this.err(`struct '${t.name}' has no field '${e.name}'`, e.nameSpan, s ? `did you mean '${s}'?` : `its fields are: ${names.join(', ')}`);
+          return 'error';
+        }
+        e.fieldIndex = i;
+        return t.fields[i].type;
+      }
       case 'Index': {
         const idxType = this.expr(e.index);
         if (idxType !== 'int' && idxType !== 'error') {
           this.err(`array index must be an int, found ${idxType}`, e.index.span, idxType === 'float' ? "convert with 'as int'" : undefined);
         }
-        if (e.target.kind !== 'Ident') {
-          this.err('only arrays and strings can be indexed', e.target.span);
-          return 'error';
-        }
-        const sym = this.lookup(e.target.name);
+        const sym = e.target.kind === 'Ident' ? this.lookup(e.target.name) : null;
         if (sym && sym.kind === 'array') {
           e.sym = sym;
           e.indexKind = 'array';
@@ -586,7 +679,7 @@ class Checker {
           if (this.fn) this.fn.imports.add('__trap');
           return 'int';
         }
-        this.err(`can't index into a value of type ${t}`, e.target.span);
+        this.err(isStruct(t) ? `can't index into ${article(t)}; use a field like value.${t.fields[0]?.name}` : `can't index into a value of type ${t}`, e.target.span);
         return 'error';
       }
       case 'ArrayLit':
@@ -603,6 +696,7 @@ class Checker {
       this.err(`can't apply '${op}' to ${lt} and ${rt}`, e.opSpan ?? e.span, hint);
       return 'error';
     };
+    if (isStruct(lt) || isStruct(rt)) return this.structBinary(e, lt, rt, bad);
     if (op === '&&' || op === '||') {
       if (lt === 'bool' && rt === 'bool') return 'bool';
       return bad(`'${op}' works on bools; compare ints explicitly, e.g. x != 0`);
@@ -645,6 +739,32 @@ class Checker {
       return bad('shifts work on ints');
     }
     throw new Error(`unknown operator ${op}`);
+  }
+
+  // Structs whose leaves are all floats (or all ints) get component-wise
+  // arithmetic, with another value of the same struct or with a scalar.
+  structBinary(e, lt, rt, bad) {
+    const op = e.op;
+    if (EQUALITY.has(op)) return lt === rt ? 'bool' : bad();
+    if (!ARITH.has(op)) return bad(`'${op}' doesn't work on structs`);
+    const S = isStruct(lt) ? lt : rt;
+    const kind = numericKind(S);
+    if (!kind) return bad(`arithmetic works on structs whose fields are all floats or all ints`);
+    if (isStruct(lt) && isStruct(rt)) {
+      if (lt !== rt) return bad();
+    } else {
+      const [scalar, st] = isStruct(lt) ? [e.right, rt] : [e.left, lt];
+      if (st !== kind) {
+        if (kind === 'float' && st === 'int' && this.coercible(scalar)) this.toFloat(scalar);
+        else return bad(`${article(S)} can be combined with ${article(kind)}, not ${article(st)}`);
+      }
+    }
+    if (kind === 'int' && (op === '/' || op === '%')) {
+      e.checkZero = true;
+      if (this.fn) this.fn.imports.add('__trap');
+    }
+    e.structOp = true;
+    return S;
   }
 
   // Integer literals (and untyped integer constants) adapt to float contexts:
@@ -726,6 +846,11 @@ class Checker {
       return 'error';
     }
     const sym = this.top.get(name);
+    if (sym && sym.kind === 'struct') {
+      this.checkArgs(e, sym.fields.map((f) => f.type), signatureText(name, sym.fields.map((f) => `${f.name}: ${f.type}`), name));
+      e.ctor = sym;
+      return sym;
+    }
     if (sym) {
       if (sym.kind !== 'func') {
         e.args.forEach((a) => this.expr(a));
@@ -779,8 +904,12 @@ class Checker {
     for (const a of e.args) {
       const t = this.expr(a);
       if (t === 'void') this.err(`can't print something that has no value`, a.span);
-      else if (t !== 'error') this.fn.imports.add(`__print_${t[0]}`);
+      else if (t !== 'error') {
+        for (const lt of leafTypes(t)) this.fn.imports.add(`__print_${lt[0]}`);
+        if (isStruct(t)) this.fn.imports.add('__print_s');
+      }
     }
+    if (e.args.length > 1) this.fn.imports.add('__print_s');
     this.fn.imports.add('__print_end');
     e.builtin = 'print';
     return 'void';
@@ -799,6 +928,10 @@ class Checker {
     const t = this.unify(e.args[1], a, e.args[2], b);
     if (!t || t === 'void') {
       this.err(`both values given to 'select' must have the same type, found ${a} and ${b}`, e.span);
+      return 'error';
+    }
+    if (isStruct(t)) {
+      this.err(`'select' works on single values, not structs`, e.span, 'use cond ? a : b instead');
       return 'error';
     }
     e.builtin = 'select';
@@ -858,10 +991,18 @@ class Checker {
       case 'Ident':
         if (e.sym?.kind === 'const') e.constValue = e.sym.value;
         return;
+      case 'Field': {
+        const v = e.target.constValue;
+        if (v === undefined || e.fieldIndex === undefined) return;
+        const start = e.target.type.fieldLeaf[e.fieldIndex];
+        e.constValue = isStruct(e.type) ? v.slice(start, start + leafCount(e.type)) : v[start];
+        return;
+      }
       case 'Unary': {
         const v = e.operand.constValue;
         if (v === undefined) return;
-        if (e.op === '-') e.constValue = e.type === 'int' ? -v | 0 : -v;
+        if (isStruct(e.type)) e.constValue = v.map((x) => (numericKind(e.type) === 'int' ? -x | 0 : -x));
+        else if (e.op === '-') e.constValue = e.type === 'int' ? -v | 0 : -v;
         else if (e.op === '!') e.constValue = !v;
         else e.constValue = ~v;
         return;
@@ -870,6 +1011,22 @@ class Checker {
         const l = e.left.constValue;
         const r = e.right.constValue;
         if (l === undefined || r === undefined) return;
+        if (isStruct(e.left.type) || isStruct(e.right.type)) {
+          if (EQUALITY.has(e.op)) {
+            const same = l.every((x, i) => x === r[i]);
+            e.constValue = e.op === '==' ? same : !same;
+            return;
+          }
+          const kind = numericKind(e.type);
+          const L = (i) => (isStruct(e.left.type) ? l[i] : l);
+          const R = (i) => (isStruct(e.right.type) ? r[i] : r);
+          const n = e.type.leafTypes.length;
+          if (kind === 'int' && (e.op === '/' || e.op === '%')) {
+            for (let i = 0; i < n; i++) if (R(i) === 0) return; // leave it to the runtime check
+          }
+          e.constValue = Array.from({ length: n }, (_, i) => evalBinary(e.op, kind, L(i), R(i)));
+          return;
+        }
         e.constValue = evalBinary(e.op, e.left.type, l, r);
         return;
       }
@@ -887,6 +1044,12 @@ class Checker {
         return;
       }
       case 'Call': {
+        if (e.ctor) {
+          const vals = e.args.map((a) => a.constValue);
+          if (vals.some((v) => v === undefined)) return;
+          e.constValue = vals.flatMap((v, i) => (isStruct(e.ctor.fields[i].type) ? v : [v]));
+          return;
+        }
         if (e.builtin === 'len' && e.lenOf) {
           e.constValue = e.lenOf.size;
           return;
@@ -915,12 +1078,24 @@ class Checker {
   }
 }
 
+function article(t) {
+  return `${/^[aeiou]/i.test(String(t)) ? 'an' : 'a'} ${t}`;
+}
+
+function zeroValue(t) {
+  if (isStruct(t)) return t.leafTypes.map(zeroValue);
+  return t === 'bool' ? false : t === 'str' ? '' : 0;
+}
+
 function isArrayDecl(item) {
   return item.kind === 'Global' && (item.type?.kind === 'ArrayType' || item.init?.kind === 'ArrayLit');
 }
 
 function describeTarget(t) {
-  return t.kind === 'Ident' ? t.name : `${t.target.name}[...]`;
+  if (t.kind === 'Ident') return t.name;
+  if (t.kind === 'Field') return `${describeTarget(t.target)}.${t.name}`;
+  if (t.kind === 'Index') return `${describeTarget(t.target)}[...]`;
+  return '(value)';
 }
 
 export function evalBinary(op, t, l, r) {

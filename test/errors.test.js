@@ -48,9 +48,9 @@ test('mutability', () => {
 
 test('functions and calls', () => {
   has(errors('fn f(a: int) -> int { return a; } fn main() { f(1, 2); }'), /takes 1 argument but 2 were given.*signature: f\(a: int\) -> int/);
-  has(errors('fn f(a: int) -> int { if a > 0 { return 1; } } fn main() {}'), /must return a int on every path/);
+  has(errors('fn f(a: int) -> int { if a > 0 { return 1; } } fn main() {}'), /must return an int on every path/);
   has(errors('fn f() { return 5; } fn main() {}'), /doesn't return a value/);
-  has(errors('fn f() -> int { return; } fn main() {}'), /must return a int/);
+  has(errors('fn f() -> int { return; } fn main() {}'), /must return an int/);
   has(errors('fn f() {} fn main() { let x = f(); }'), /returns nothing/);
   has(errorsIn('break;'), /inside a loop/);
   has(errorsIn('let a = 1; let m = min(a, 2.5);'), /no version of 'min' takes \(int, float\)/);

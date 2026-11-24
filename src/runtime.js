@@ -87,7 +87,7 @@ export async function instantiate(compiled, opts = {}) {
     __print_b: (v) => parts.push(v ? 'true' : 'false'),
     __print_s: (p) => parts.push(readStr(p)),
     __print_end: () => {
-      const line = parts.join(' ');
+      const line = parts.join('');
       parts = [];
       print(line);
     },
