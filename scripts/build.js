@@ -20,7 +20,8 @@ const EXAMPLES = [
   ['fire', 'Fire'],
   ['life', 'Game of Life'],
   ['particles', 'Particle fountain'],
-  ['dodge', 'Stardust (a game)'],
+  ['sequencer', 'Step sequencer (sound)'],
+  ['dodge', 'Stardust (a game, with sound)'],
 ];
 
 const IMPORT = /^import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"];?[ \t]*$/gm;

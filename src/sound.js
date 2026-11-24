@@ -18,8 +18,9 @@ export const WAVES = ['square', 'triangle', 'sawtooth', 'sine', 'noise'];
 /** Per-wave loudness, so a square and a sine at the same volume feel similar. */
 export const WAVE_GAIN = [0.4, 1.0, 0.45, 1.0, 1.4];
 
-export const MASTER_GAIN = 0.5;
-export const MAX_SOUNDS_PER_FRAME = 32;
+export const MASTER_GAIN = 0.4;
+export const MAX_SOUNDS_PER_FRAME = 64;
+export const MAX_VOICES = 48;
 export const FADE_FLOOR = 1e-4;
 
 export function envelopeTimes(dur) {

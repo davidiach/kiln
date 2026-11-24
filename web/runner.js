@@ -8,7 +8,8 @@ const START_LIMIT_MS = 10000;
 const FRAME_LIMIT_MS = 3000;
 
 export class Runner {
-  constructor({ canvas, width, height, workerSource, onPrint, onError, onState }) {
+  constructor({ canvas, width, height, workerSource, audio, onPrint, onError, onState }) {
+    this.audio = audio;
     this.canvas = canvas;
     this.width = width;
     this.height = height;
@@ -18,7 +19,9 @@ export class Runner {
     this.onPrint = onPrint;
     this.onError = onError;
     this.onState = onState;
-    this.input = { mouseX: width / 2, mouseY: height / 2, mouseDown: false, keys: new Set() };
+    // `clicked` and `tapped` latch presses until a frame has seen them, so a
+    // click or key tap shorter than one frame still reaches the program.
+    this.input = { mouseX: width / 2, mouseY: height / 2, mouseDown: false, clicked: false, keys: new Set(), tapped: new Set() };
     this.t0 = performance.now();
     this.worker = null;
     this.useWorker = !!workerSource && typeof Worker !== 'undefined';
@@ -44,18 +47,25 @@ export class Runner {
   /** Start a compiled program. Live edits keep the clock running so animations don't jump. */
   start(compiled, { resetTime = true } = {}) {
     this.kill();
+    this.audio?.reset();
     if (resetTime) this.t0 = performance.now();
     this.program = { binary: compiled.binary, traps: compiled.traps, width: compiled.width, height: compiled.height };
     this.hasFrame = false;
     this.ready = false;
     this.worker = this.spawn();
     this.setState('starting');
-    this.send({ type: 'start', program: this.program, input: this.inputMessage() }, START_LIMIT_MS);
+    this.send({ type: 'start', t: this.now(), program: this.program, input: this.inputMessage() }, START_LIMIT_MS);
   }
 
   stop() {
     this.kill();
+    this.audio?.reset();
     this.setState('stopped');
+  }
+
+  /** The program's clock, in seconds. */
+  now() {
+    return (performance.now() - this.t0) / 1000;
   }
 
   kill() {
@@ -109,6 +119,7 @@ export class Runner {
   receive(msg) {
     this.busy = false;
     if (msg.lines?.length || msg.dropped) this.onPrint?.(msg.lines, msg.dropped);
+    if (msg.sounds?.length) this.audio?.play(msg.sounds, msg.t);
     if (msg.pixels) {
       this.image.data.set(msg.pixels);
       this.ctx.putImageData(this.image, 0, 0);
@@ -128,6 +139,7 @@ export class Runner {
 
   fail(err) {
     this.kill();
+    this.audio?.reset();
     this.onError?.(err);
     this.setState('error');
   }
@@ -155,13 +167,16 @@ export class Runner {
       if (this.state === 'running') this.onState?.({ state: 'running', fps: this.fps });
     }
     if (this.worker && this.ready && this.hasFrame && !this.busy) {
-      this.send({ type: 'frame', t: (now - this.t0) / 1000, input: this.inputMessage() }, FRAME_LIMIT_MS);
+      this.send({ type: 'frame', t: this.now(), input: this.inputMessage() }, FRAME_LIMIT_MS);
     }
   }
 
   inputMessage() {
     const i = this.input;
-    return { mouseX: i.mouseX, mouseY: i.mouseY, mouseDown: i.mouseDown, keys: [...i.keys] };
+    const msg = { mouseX: i.mouseX, mouseY: i.mouseY, mouseDown: i.mouseDown || i.clicked, keys: [...new Set([...i.keys, ...i.tapped])] };
+    i.clicked = false;
+    i.tapped.clear();
+    return msg;
   }
 
   bindInput() {
@@ -175,6 +190,7 @@ export class Runner {
     c.addEventListener('pointerdown', (e) => {
       move(e);
       this.input.mouseDown = true;
+      this.input.clicked = true;
       c.focus({ preventScroll: true });
       c.setPointerCapture?.(e.pointerId);
     });
@@ -185,6 +201,7 @@ export class Runner {
       const code = KEYMAP[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase().charCodeAt(0) : null);
       if (code === null || e.ctrlKey || e.metaKey) return;
       this.input.keys.add(code);
+      this.input.tapped.add(code);
       e.preventDefault();
     });
     c.addEventListener('keyup', (e) => {

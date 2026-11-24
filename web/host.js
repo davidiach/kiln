@@ -2,6 +2,7 @@
 // Used inside a Web Worker, or directly on the main thread as a fallback.
 
 import { instantiate, explainError } from '../src/runtime.js';
+import { MAX_SOUNDS_PER_FRAME } from '../src/sound.js';
 
 const MAX_LINES = 400;
 
@@ -9,6 +10,10 @@ export function createHost(post) {
   let inst = null;
   let lines = [];
   let dropped = 0;
+  let sounds = [];
+  const sound = (ev) => {
+    if (sounds.length < MAX_SOUNDS_PER_FRAME) sounds.push(ev);
+  };
   const input = { mouseX: 160, mouseY: 120, mouseDown: false, keys: new Set() };
 
   const print = (line) => {
@@ -19,9 +24,10 @@ export function createHost(post) {
     }
   };
   const flush = () => {
-    const out = { lines, dropped };
+    const out = { lines, dropped, sounds };
     lines = [];
     dropped = 0;
+    sounds = [];
     return out;
   };
   const setInput = (i) => {
@@ -46,10 +52,10 @@ export function createHost(post) {
       if (msg.type === 'start') {
         try {
           setInput(msg.input);
-          inst = await instantiate(msg.program, { print, input });
+          inst = await instantiate(msg.program, { print, input, sound, startTime: msg.t });
           inst.main();
           const px = pixels();
-          post({ type: 'ready', hasFrame: inst.hasFrame, hasScreen: inst.hasScreen, pixels: px, ...flush() }, px ? [px.buffer] : []);
+          post({ type: 'ready', t: msg.t, hasFrame: inst.hasFrame, hasScreen: inst.hasScreen, pixels: px, ...flush() }, px ? [px.buffer] : []);
         } catch (e) {
           fail(e);
         }
@@ -58,7 +64,7 @@ export function createHost(post) {
           setInput(msg.input);
           inst.frame(msg.t);
           const px = pixels();
-          post({ type: 'frame', pixels: px, ...flush() }, px ? [px.buffer] : []);
+          post({ type: 'frame', t: msg.t, pixels: px, ...flush() }, px ? [px.buffer] : []);
         } catch (e) {
           fail(e);
         }

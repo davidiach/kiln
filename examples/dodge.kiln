@@ -1,6 +1,7 @@
 // STARDUST: a tiny arcade game.
 // Steer with the arrow keys (or the mouse). Catch the gold stars,
 // dodge the rocks. Things speed up as you go. SPACE restarts.
+// Click the page once to turn on the sound effects.
 
 struct Vec2 { x: float, y: float }
 struct Rock { pos: Vec2, radius: int, speed: float }
@@ -79,6 +80,11 @@ fn frame(t: float) {
     ship_x = clamp(ship_x, 8.0, WIDTH as float - 8.0);
   } else if key_down(KEY_SPACE) || mouse_down() {
     restart();
+    // a rising three-note jingle
+    for k in 0..3 {
+      let f = note(67 + k * 5);
+      sound_at(t + k as float * 0.07, WAVE_TRIANGLE, f, f, 0.16, 0.4);
+    }
   }
 
   let sx = ship_x as int;
@@ -104,6 +110,8 @@ fn frame(t: float) {
       alive = false;
       flash = 1.0;
       best = max(best, score);
+      sound(WAVE_NOISE, 2500.0, 70.0, 0.9, 1.0);   // the crash...
+      sound(WAVE_SINE, 150.0, 35.0, 0.7, 1.0);     // ...and the boom under it
     }
   }
 
@@ -120,6 +128,9 @@ fn frame(t: float) {
       score += 10;
       flash = 0.35;
       stars[i] = new_star();
+      // a two-step "bling", the second note a fifth above the first
+      sound(WAVE_SQUARE, 988.0, 1976.0, 0.08, 0.25);
+      sound_at(t + 0.06, WAVE_SQUARE, 1480.0, 2960.0, 0.12, 0.22);
     }
   }
 

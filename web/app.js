@@ -3,6 +3,7 @@
 import { compile } from '../src/compiler.js';
 import { createEditor } from './editor.js';
 import { Runner } from './runner.js';
+import { AudioEngine } from './audio.js';
 import { highlightWat, escapeHtml } from './highlight.js';
 
 const $ = (s) => document.querySelector(s);
@@ -38,7 +39,9 @@ let rendered = { wat: null, bytes: null };
 let runtimeError = null;
 
 const editor = createEditor($('#editor'), { onChange: onEdit, onRun: () => run(true) });
+const audio = new AudioEngine({ muted: store.get('kiln.muted') === '1', onChange: showSound });
 const runner = new Runner({
+  audio,
   canvas: $('#screen'),
   width: 320,
   height: 240,
@@ -244,6 +247,45 @@ document.addEventListener('keydown', (e) => {
     run(true);
   }
 });
+
+// ------------------------------------------------------------- sound
+
+const SPEAKER = '<path class="body" d="M2 6h2.5L8 3v10L4.5 10H2z"/>';
+const WAVES_ICON = '<path class="wave" d="M10.5 6a2.5 2.5 0 0 1 0 4M12.5 4a5.3 5.3 0 0 1 0 8"/>';
+const MUTED_ICON = '<path class="wave" d="M10.5 6l4 4M14.5 6l-4 4"/>';
+
+function showSound() {
+  const b = $('#sound');
+  const state = audio.state;
+  const icon = state === 'on' ? WAVES_ICON : MUTED_ICON;
+  const label = state === 'on' ? 'Sound on' : state === 'muted' ? 'Sound off' : 'Enable sound';
+  b.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true">${SPEAKER}${icon}</svg>${label}`;
+  b.dataset.state = state;
+  b.dataset.wanted = String(state === 'locked' && audio.wanted);
+  b.setAttribute('aria-pressed', String(state === 'on'));
+  b.title = state === 'locked' ? 'Browsers only play sound after you interact with the page' : state === 'on' ? 'Mute' : 'Unmute';
+}
+
+// Any click or key press on the page counts as permission to play sound.
+// Remember whether audio was still locked when the gesture began, so the
+// first click on the sound button enables sound instead of muting it.
+let lockedAtGesture = true;
+for (const type of ['pointerdown', 'keydown']) {
+  window.addEventListener(
+    type,
+    () => {
+      lockedAtGesture = audio.state === 'locked';
+      audio.unlock();
+    },
+    { capture: true },
+  );
+}
+$('#sound').addEventListener('click', () => {
+  audio.setMuted(lockedAtGesture ? false : !audio.muted);
+  store.set('kiln.muted', audio.muted ? '1' : '0');
+});
+showSound();
+window.__kiln = { audio, runner };
 
 // ------------------------------------------------------------- tabs
 

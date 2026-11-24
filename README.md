@@ -5,7 +5,7 @@
 Kiln's compiler is about 3,300 lines of dependency-free JavaScript. It lexes, parses, type-checks and
 then writes the WebAssembly binary *byte by byte*: no LLVM, no Binaryen, no `wat2wasm`. It is fast
 enough to recompile on every keystroke, so the playground feels like a fantasy console: type
-code on the left and watch it run at native speed on a 320×240 screen on the right.
+code on the left and watch it run at native speed on a 320×240 screen on the right, with sound.
 
 ![The Kiln playground running the voxel landscape example](docs/img/playground.jpg)
 
@@ -24,7 +24,11 @@ code on the left and watch it run at native speed on a 320×240 screen on the ri
 </tr>
 <tr>
 <td><img src="docs/img/life.png" width="320" alt="Game of Life"><br><sub><b>life</b>: Conway's Life with glowing trails; draw with the mouse</sub></td>
-<td><img src="docs/img/dodge.png" width="320" alt="Stardust"><br><sub><b>dodge</b>: a small arcade game with score and restart</sub></td>
+<td><img src="docs/img/dodge.png" width="320" alt="Stardust"><br><sub><b>dodge</b>: a small arcade game with sound effects</sub></td>
+</tr>
+<tr>
+<td><img src="docs/img/sequencer.png" width="320" alt="Step sequencer"><br><sub><b>sequencer</b>: click to compose; a 16-step drum and melody loop</sub></td>
+<td><img src="docs/img/hello.png" width="320" alt="Hello, Kiln"><br><sub><b>hello</b>: a guided first program</sub></td>
 </tr>
 </table>
 
@@ -46,6 +50,7 @@ node bin/kiln.js run examples/hello.kiln          # compile and run main()
 node bin/kiln.js wat examples/plasma.kiln         # print the generated WebAssembly text
 node bin/kiln.js build examples/fire.kiln         # write fire.wasm
 node bin/kiln.js render examples/raymarch.kiln -t 3 -o shot.png   # headless screenshot
+node bin/kiln.js audio examples/sequencer.kiln -t 8 -o loop.wav    # headless audio recording
 ```
 
 ## A taste
@@ -154,6 +159,29 @@ compiles to two additions, with no memory traffic and no temporaries:
 Arrays of structs are laid out in linear memory with natural alignment, and `balls[i].vel.y` compiles to one bounds
 check plus a single `f64.load` at a constant offset.
 
+### Sound
+
+```rust
+beep(440.0, 0.2);                               // frequency in Hz, seconds
+sound(WAVE_SQUARE, 988.0, 1976.0, 0.1, 0.3);    // wave, from Hz, to Hz, seconds, volume
+sound(WAVE_NOISE, 2500.0, 70.0, 0.9, 1.0);      // noise sweeping down: an explosion
+sound_at(t + 0.5, WAVE_TRIANGLE, note(60), note(60), 0.3, 0.5);   // middle C, half a second from now
+```
+
+Five waves (square, triangle, saw, sine and filtered noise), each with an exponential pitch slide and a short
+attack-hold-fade envelope. That's enough for chiptune music and arcade effects. `note(n)` converts MIDI note
+numbers to Hz.
+
+Programs run in a Web Worker, which can't use Web Audio, so a sound call just records an *event* on the program's
+clock (the same clock as `t` and `now()`). Events ride along with each frame's pixels, and the page schedules them on
+the audio clock with a small fixed latency. Because events carry exact times, `sound_at` can schedule notes between
+frames: the [sequencer](examples/sequencer.kiln) uses the classic look-ahead pattern, so its beat stays sample-steady
+even when frames jitter.
+
+Every event follows one small spec ([`src/sound.js`](src/sound.js)), implemented twice: with Web Audio nodes in the
+playground, and by a software synth ([`src/synth.js`](src/synth.js)) that `kiln audio` uses to record WAV files. The
+software synth is also what the tests listen to: they measure pitch, slides, timing and the envelope from the samples.
+
 ### Friendly errors
 
 The checker reports every type error it finds, with a span, and offers suggestions where it can:
@@ -188,7 +216,8 @@ source ──lex──▶ tokens ──parse──▶ AST ──check──▶ t
 | [`src/codegen.js`](src/codegen.js) | Emits wasm instructions and a matching WAT listing side by side; strips dead code |
 | [`src/wasm.js`](src/wasm.js) | LEB128, section encoding, the opcode table |
 | [`src/prelude.js`](src/prelude.js) | The standard library, in Kiln |
-| [`src/runtime.js`](src/runtime.js) | Host imports, readable trap messages, framebuffer to RGBA |
+| [`src/runtime.js`](src/runtime.js) | Host imports, readable trap messages, framebuffer to RGBA, sound events |
+| [`src/sound.js`](src/sound.js), [`src/synth.js`](src/synth.js) | The sound spec, and an offline synth with a WAV encoder |
 | [`web/`](web) | The playground: editor, worker runner with a watchdog, inspector tabs |
 | [`scripts/build.js`](scripts/build.js) | A 40-line bundler, then inlines everything into one HTML file |
 
@@ -239,7 +268,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 49 tests: language semantics, structs, error messages, runtime traps, every example, the build
+npm test           # 61 tests: language semantics, structs, sound, error messages, runtime traps, every example, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -250,7 +279,7 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 ## Limits and ideas
 
 Kiln is deliberately small. There are no closures, methods, generics, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. Natural next steps would be sound via an audio worklet,
+modules; arrays are global and can't be passed around. Natural next steps would be a guided tour in the playground,
 `f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back to lines.
 
 ## License
