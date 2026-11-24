@@ -6,6 +6,7 @@ import { basename } from 'node:path';
 import { compile, formatError } from '../src/compiler.js';
 import { instantiate } from '../src/runtime.js';
 import { encodePNG } from '../src/png.js';
+import { renderSounds, encodeWav } from '../src/synth.js';
 
 const USAGE = `kiln: a tiny language that compiles to WebAssembly
 
@@ -16,6 +17,8 @@ usage:
   kiln wat <file.kiln>                   print the generated WebAssembly text
   kiln render <file.kiln> [-t secs] [-o out.png] [--scale N]
                                          run headless and save the screen as PNG
+  kiln audio <file.kiln> [-t secs] [-o out.wav]
+                                         run headless and record the sound as WAV
 `;
 
 function arg(args, flag, fallback) {
@@ -79,6 +82,18 @@ async function main(argv) {
         for (let i = 0; i <= frames; i++) inst.frame(i / 60);
         writeFileSync(out, encodePNG(inst.pixels(), inst.width, inst.height, scale));
         console.log(`wrote ${out} (t = ${secs}s)`);
+        break;
+      }
+      case 'audio': {
+        const secs = Number(arg(rest, '-t', 4));
+        const out = arg(rest, '-o', `${stem}.wav`);
+        const events = [];
+        const inst = await instantiate(result, { print: () => {}, random: seeded(1234), sound: (e) => events.push(e) });
+        inst.main();
+        const frames = Math.round(secs * 60);
+        for (let i = 0; i <= frames; i++) inst.frame(i / 60);
+        writeFileSync(out, encodeWav(renderSounds(events, secs), 44100));
+        console.log(`wrote ${out} (${secs}s, ${events.length} sound${events.length === 1 ? '' : 's'})`);
         break;
       }
       default:

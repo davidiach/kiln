@@ -870,7 +870,8 @@ class Checker {
     if (name === 'select') return this.selectCall(e);
     if (name === 'len') return this.lenCall(e);
     if (name in INTRINSICS) return this.intrinsicCall(e, INTRINSICS[name]);
-    if (name in IMPORTS && !name.startsWith('__')) {
+    // "__" imports are internal: only the prelude may call them directly.
+    if (name in IMPORTS && (!name.startsWith('__') || this.origin === 'prelude')) {
       const sig = IMPORTS[name];
       if (!this.fn && !(name in FOLDABLE)) {
         this.err(`'${name}' can't be used in a constant expression`, e.span);

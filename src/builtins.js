@@ -38,12 +38,14 @@ export const IMPORTS = {
   mouse_y: { params: [], ret: I },
   mouse_down: { params: [], ret: B },
   key_down: { params: [I], ret: B },
+  now: { params: [], ret: F },
   __print_i: { params: [I], ret: 'void' },
   __print_f: { params: [F], ret: 'void' },
   __print_b: { params: [B], ret: 'void' },
   __print_s: { params: [S], ret: 'void' },
   __print_end: { params: [], ret: 'void' },
   __trap: { params: [I, I], ret: 'void' },
+  __sound: { params: [F, I, F, F, F, F], ret: 'void' },
 };
 
 export const SPECIAL = new Set(['print', 'select', 'len']);

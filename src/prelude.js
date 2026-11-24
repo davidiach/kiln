@@ -24,6 +24,12 @@ const KEY_DOWN = 40;
 const KEY_SPACE = 32;
 const KEY_ENTER = 13;
 
+const WAVE_SQUARE = 0;
+const WAVE_TRIANGLE = 1;
+const WAVE_SAW = 2;
+const WAVE_SINE = 3;
+const WAVE_NOISE = 4;
+
 // The framebuffer. Colors are 0xRRGGBB.
 var screen: [int; WIDTH * HEIGHT];
 
@@ -188,6 +194,30 @@ fn number(x: int, y: int, n: int, color: int) {
     glyph(cx + (digits - 1 - i) * 4, y, 48 + v % 10, color);
     v /= 10;
   }
+}
+
+// ---- sound
+
+// Play a sound now. The pitch slides from freq to to_freq (in Hz) over its
+// length; pass the same value twice for a steady tone. For WAVE_NOISE the
+// "pitch" is how bright the noise is. Volume is 0..1.
+fn sound(wave: int, freq: float, to_freq: float, seconds: float, volume: float) {
+  __sound(now(), wave, freq, to_freq, seconds, volume);
+}
+
+// Schedule a sound at an exact time, on the same clock as frame(t) and now().
+// Scheduling slightly ahead keeps music in time even when a frame runs late.
+fn sound_at(time: float, wave: int, freq: float, to_freq: float, seconds: float, volume: float) {
+  __sound(time, wave, freq, to_freq, seconds, volume);
+}
+
+fn beep(freq: float, seconds: float) {
+  sound(WAVE_SQUARE, freq, freq, seconds, 0.3);
+}
+
+// The frequency of a MIDI note number: 60 is middle C, 69 is A (440 Hz).
+fn note(n: int) -> float {
+  return 440.0 * pow(2.0, (n - 69) as float / 12.0);
 }
 
 // ---- math
