@@ -1,0 +1,147 @@
+// STARDUST: a tiny arcade game.
+// Steer with the arrow keys (or the mouse). Catch the gold stars,
+// dodge the rocks. Things speed up as you go. SPACE restarts.
+
+const ROCKS = 14;
+const STARS = 6;
+
+var rock_x: [float; ROCKS];
+var rock_y: [float; ROCKS];
+var rock_r: [int; ROCKS];
+var rock_v: [float; ROCKS];
+var star_x: [float; STARS];
+var star_y: [float; STARS];
+var star_v: [float; STARS];
+
+var ship_x = 160.0;
+var score = 0;
+var best = 0;
+var alive = true;
+var speed = 1.0;
+var last_t = 0.0;
+var last_mouse = 0;
+var flash = 0.0;
+
+fn reset_rock(i: int, top: bool) {
+  rock_r[i] = 5 + (rand() * 9.0) as int;
+  rock_x[i] = rand() * WIDTH as float;
+  rock_y[i] = top ? -20.0 - rand() * 80.0 : -rand() * 300.0;
+  rock_v[i] = 40.0 + rand() * 50.0;
+}
+
+fn reset_star(i: int) {
+  star_x[i] = 10.0 + rand() * 300.0;
+  star_y[i] = -10.0 - rand() * 250.0;
+  star_v[i] = 50.0 + rand() * 30.0;
+}
+
+fn restart() {
+  for i in 0..ROCKS { reset_rock(i, false); }
+  for i in 0..STARS { reset_star(i); }
+  score = 0;
+  speed = 1.0;
+  alive = true;
+  ship_x = 160.0;
+}
+
+fn main() {
+  restart();
+}
+
+fn draw_ship(x: int, y: int) {
+  for row in 0..12 {
+    let half = row / 2;
+    rect(x - half, y + row, half * 2 + 1, 1, row < 9 ? 0x9fe8ff : 0x3a7fa0);
+  }
+  if alive {
+    let flicker = (rand() * 4.0) as int;
+    rect(x - 2, y + 12, 5, 3 + flicker, 0xffaa33);
+  }
+}
+
+fn frame(t: float) {
+  let dt = clamp(t - last_t, 0.0, 0.05);
+  last_t = t;
+
+  // background: drifting star field
+  clear(0x06061a);
+  for i in 0..90 {
+    let depth = 0.3 + hashf(i) * 0.7;
+    let sy = (hashf(i + 500) * 260.0 + t * 30.0 * depth * speed) % 260.0;
+    let c = depth > 0.7 ? 0xb0b0d0 : 0x505070;
+    pixel((hashf(i + 900) * WIDTH as float) as int, sy as int - 10, c);
+  }
+
+  if alive {
+    speed += dt * 0.025;
+    // controls: keys, or the mouse once it moves
+    if key_down(KEY_LEFT) { ship_x -= 190.0 * dt; }
+    if key_down(KEY_RIGHT) { ship_x += 190.0 * dt; }
+    let m = mouse_x();
+    if m != last_mouse { ship_x = mix(ship_x, m as float, 0.3); }
+    last_mouse = m;
+    ship_x = clamp(ship_x, 8.0, WIDTH as float - 8.0);
+  } else if key_down(KEY_SPACE) || mouse_down() {
+    restart();
+  }
+
+  let sx = ship_x as int;
+  let sy = 212;
+
+  for i in 0..ROCKS {
+    rock_y[i] += rock_v[i] * speed * dt;
+    if rock_y[i] > HEIGHT as float + 20.0 {
+      reset_rock(i, true);
+      if alive { score += 1; }
+    }
+    let rx = rock_x[i] as int;
+    let ry = rock_y[i] as int;
+    let r = rock_r[i];
+    circle(rx, ry, r, 0x6b5a4e);
+    circle(rx - r / 3, ry - r / 3, r / 3, 0x8a7766);
+    // collision with the ship's body
+    let dx = rx - sx;
+    let dy = ry - (sy + 7);
+    if alive && dx * dx + dy * dy < (r + 5) * (r + 5) {
+      alive = false;
+      flash = 1.0;
+      best = max(best, score);
+    }
+  }
+
+  for i in 0..STARS {
+    star_y[i] += star_v[i] * speed * dt;
+    if star_y[i] > HEIGHT as float + 10.0 { reset_star(i); }
+    let x = star_x[i] as int;
+    let y = star_y[i] as int;
+    let twinkle = 0.75 + 0.25 * sin(t * 10.0 + i as float);
+    let c = rgbf(1.0 * twinkle, 0.85 * twinkle, 0.2);
+    rect(x - 1, y - 3, 3, 7, c);
+    rect(x - 3, y - 1, 7, 3, c);
+    if alive && abs(x - sx) < 9 && abs(y - (sy + 6)) < 10 {
+      score += 10;
+      flash = 0.35;
+      reset_star(i);
+    }
+  }
+
+  draw_ship(sx, sy);
+
+  if flash > 0.0 {
+    flash -= dt * 2.0;
+    for x in 0..WIDTH {
+      if hash(x + (t * 60.0) as int) % 3 == 0 { pixel(x, 0, 0xffffff); pixel(x, HEIGHT - 1, 0xffffff); }
+    }
+  }
+
+  text(4, 4, "SCORE", 0x8888aa);
+  number(28, 4, score, 0xffffff);
+  text(WIDTH - 52, 4, "BEST", 0x8888aa);
+  number(WIDTH - 32, 4, best, 0xffd34d);
+
+  if !alive {
+    rect(60, 90, 200, 56, 0x10102a);
+    text_big(84, 98, "GAME OVER", 4, 0xff5a5a);
+    text(98, 128, "PRESS SPACE OR CLICK", 0xc0c0d8);
+  }
+}

@@ -1,0 +1,53 @@
+// Welcome to Kiln!
+//
+// Kiln is a small, statically typed language. This page compiles it to
+// WebAssembly in your browser as you type: no server involved.
+// Check the WAT tab to see exactly what your code turned into.
+//
+// main() runs once. Define frame(t: float) to animate.
+
+fn fib(n: int) -> int {
+  return n < 2 ? n : fib(n - 1) + fib(n - 2);
+}
+
+// Sieve of Eratosthenes, with a global array.
+const LIMIT = 100;
+var composite: [bool; LIMIT];
+
+fn count_primes() -> int {
+  var count = 0;
+  for i in 2..LIMIT {
+    if composite[i] { continue; }
+    count += 1;
+    for j in i * i..LIMIT {
+      if j % i == 0 { composite[j] = true; }
+    }
+  }
+  return count;
+}
+
+fn main() {
+  print("Hello from WebAssembly!");
+  print("fib(30) =", fib(30));
+  print("primes below", LIMIT, ":", count_primes());
+
+  // Ints and floats never mix silently: convert with 'as'.
+  let n = 7;
+  let ratio = n as float / 2.0;
+  print("7 / 2 =", n / 2, "but 7.0 / 2.0 =", ratio);
+
+  // Strings are byte arrays you can index.
+  let word = "kiln";
+  var shout = 0;
+  for i in 0..len(word) { shout += word[i]; }
+  print("sum of bytes in", word, "=", shout);
+
+  // The screen is 320 x 240. Colors are 0xRRGGBB.
+  clear(0x1a1a2e);
+  for i in 0..WIDTH {
+    let y = 150 + (sin(i as float * 0.05) * 30.0) as int;
+    circle(i, y, 3, hsv(i as float / WIDTH as float, 0.7, 1.0));
+  }
+  text_big(56, 50, "HELLO KILN", 6, 0xffffff);
+  text(84, 210, "EDIT ME! I RECOMPILE AS YOU TYPE", 0x9a9ab0);
+}

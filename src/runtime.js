@@ -56,7 +56,7 @@ const decoder = new TextDecoder();
  */
 export async function instantiate(compiled, opts = {}) {
   const print = opts.print ?? ((line) => console.log(line));
-  const input = opts.input ?? { mouseX: 0, mouseY: 0, mouseDown: false, keys: new Set() };
+  const input = opts.input ?? { mouseX: compiled.width / 2, mouseY: compiled.height / 2, mouseDown: false, keys: new Set() };
   let memory = null;
   let parts = [];
 

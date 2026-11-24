@@ -153,6 +153,23 @@ fn text_width(s: str) -> int {
   return len(s) * 4 - 1;
 }
 
+// Text drawn with size x size blocks per font pixel.
+fn text_big(x: int, y: int, s: str, size: int, color: int) {
+  for i in 0..len(s) {
+    var c = s[i];
+    if c >= 97 && c <= 122 { c -= 32; }
+    if c < 32 || c > 95 { continue; }
+    let bits = FONT[c - 32];
+    for row in 0..5 {
+      for col in 0..3 {
+        if (bits >> (14 - row * 3 - col)) & 1 == 1 {
+          rect(x + (i * 4 + col) * size, y + row * size, size, size, color);
+        }
+      }
+    }
+  }
+}
+
 fn number(x: int, y: int, n: int, color: int) {
   var v = n;
   var cx = x;

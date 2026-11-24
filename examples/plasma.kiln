@@ -1,24 +1,29 @@
 // Plasma: the classic demoscene effect.
-// Every pixel adds up a few sine waves; the sum picks a color.
-// Edit the numbers while it runs; it recompiles as you type.
+// Every pixel adds up a few sine waves and the sum picks a color.
+// Tweak the numbers while it runs; it recompiles as you type.
+
+// A cosine palette: smooth, looping colors from one float.
+fn palette(t: float) -> int {
+  let r = 0.5 + 0.5 * cos(TAU * (t + 0.00));
+  let g = 0.5 + 0.5 * cos(TAU * (t + 0.15));
+  let b = 0.5 + 0.5 * cos(TAU * (t + 0.30));
+  return rgbf(r * 0.9, g * 0.8, b);
+}
 
 fn frame(t: float) {
   for y in 0..HEIGHT {
+    let v = y as float / 38.0;
     for x in 0..WIDTH {
-      let u = x as float / 40.0;
-      let v = y as float / 40.0;
+      let u = x as float / 38.0;
 
       var s = sin(u + t);
       s += sin((v + t) * 0.7);
       s += sin((u + v + t * 0.6) * 0.8);
       let cx = u + 2.0 * sin(t * 0.33);
       let cy = v + 2.0 * cos(t * 0.5);
-      s += sin(sqrt(cx * cx + cy * cy + 1.0) + t);
+      s += sin(sqrt(cx * cx + cy * cy + 1.0) * 1.5 + t);
 
-      let r = 0.5 + 0.5 * sin(PI * s);
-      let g = 0.5 + 0.5 * sin(PI * s + 2.1);
-      let b = 0.5 + 0.5 * sin(PI * s + 4.2);
-      pixel(x, y, rgbf(r, g, b));
+      pixel(x, y, palette(s * 0.25 + t * 0.05));
     }
   }
 }

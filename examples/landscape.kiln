@@ -1,0 +1,131 @@
+// Voxel landscape: a fractal-noise world rendered one screen column at a
+// time, front to back, the way early-90s flight sims did it.
+// The 256 x 256 height map is generated once, in main().
+
+const MAP = 256;
+const MASK = MAP - 1;
+const WATER = 0.30;
+const FAR = 320.0;
+
+var ground: [float; MAP * MAP];
+var shade: [int; MAP * MAP];
+var ybuf: [int; WIDTH];
+var sky: [int; HEIGHT];
+var altitude = 60.0;
+
+// Value noise that tiles with period p, so the world wraps seamlessly.
+fn lattice(ix: int, iy: int, p: int) -> float {
+  return (hash2((ix % p + p) % p, (iy % p + p) % p) >>> 8) as float / 16777216.0;
+}
+
+fn tile_noise(x: float, y: float, p: int) -> float {
+  let ix = floor(x) as int;
+  let iy = floor(y) as int;
+  let fx = smoothstep(0.0, 1.0, x - floor(x));
+  let fy = smoothstep(0.0, 1.0, y - floor(y));
+  let top = mix(lattice(ix, iy, p), lattice(ix + 1, iy, p), fx);
+  let bottom = mix(lattice(ix, iy + 1, p), lattice(ix + 1, iy + 1, p), fx);
+  return mix(top, bottom, fy);
+}
+
+fn terrain(x: int, y: int) -> float {
+  var sum = 0.0;
+  var amp = 0.55;
+  var period = 4;
+  for octave in 0..6 {
+    let f = period as float / MAP as float;
+    sum += amp * tile_noise(x as float * f, y as float * f, period);
+    amp *= 0.5;
+    period *= 2;
+  }
+  return pow(clamp(sum, 0.0, 1.0), 1.8) * 1.35;
+}
+
+fn at(x: float, y: float) -> int {
+  return ((floor(y) as int) & MASK) * MAP + ((floor(x) as int) & MASK);
+}
+
+fn main() {
+  for y in 0..MAP {
+    for x in 0..MAP {
+      ground[y * MAP + x] = max(terrain(x, y), WATER);
+    }
+  }
+  // Color each cell by height, lit by the slope facing the sun.
+  for y in 0..MAP {
+    for x in 0..MAP {
+      let h = ground[y * MAP + x];
+      let slope = h - ground[((y + 1) & MASK) * MAP + ((x + 1) & MASK)];
+      let light = clamp(0.75 + slope * 12.0, 0.35, 1.25);
+      var c = 0x2b6cb0;
+      if h > WATER + 0.01 { c = 0xd8c48a; }
+      if h > WATER + 0.04 { c = blend(0x4f8a3a, 0x2f5f2a, noise(x as float * 0.2, y as float * 0.2)); }
+      if h > 0.62 { c = 0x7b7468; }
+      if h > 0.80 { c = 0xf2f4f8; }
+      if h > WATER { c = blend(0, c, light * 0.8); }
+      shade[y * MAP + x] = c;
+    }
+  }
+  for y in 0..HEIGHT {
+    sky[y] = blend(0x1c3f7a, 0xf4b67a, smoothstep(0.0, 1.0, y as float / 120.0));
+  }
+}
+
+fn frame(t: float) {
+  let cam_x = 40.0 * sin(t * 0.07);
+  let cam_y = -t * 22.0;
+  let heading = 0.5 * sin(t * 0.11);
+  let sn = sin(heading);
+  let cs = cos(heading);
+
+  // Glide smoothly over the hills ahead instead of snapping to the ground.
+  var ahead = 0.0;
+  for k in 0..6 {
+    let d = k as float * 12.0;
+    ahead = max(ahead, ground[at(cam_x - sn * d, cam_y - cs * d)]);
+  }
+  altitude = mix(altitude, ahead * 100.0 + 38.0, 0.05);
+
+  for y in 0..HEIGHT {
+    rect(0, y, WIDTH, 1, sky[y]);
+  }
+  for i in 0..WIDTH {
+    ybuf[i] = HEIGHT;
+  }
+
+  let horizon = 70.0;
+  let lift = 140.0;
+  var z = 1.0;
+  var dz = 0.4;
+  while z < FAR {
+    // The row of the map at distance z, from the left edge of view to the right.
+    var lx = -cs * z - sn * z + cam_x;
+    var ly = sn * z - cs * z + cam_y;
+    let rx = cs * z - sn * z + cam_x;
+    let ry = -sn * z - cs * z + cam_y;
+    let stepx = (rx - lx) / WIDTH as float;
+    let stepy = (ry - ly) / WIDTH as float;
+    let fog = smoothstep(FAR * 0.35, FAR, z);
+
+    for i in 0..WIDTH {
+      let cell = at(lx, ly);
+      let h = ground[cell] * 100.0;
+      let top = max(((altitude - h) / z * lift + horizon) as int, 0);
+      if top < ybuf[i] {
+        var c = shade[cell];
+        if h <= WATER * 100.0 + 0.01 {
+          c = blend(0x1f4f96, 0x6fa8dc, 0.5 + 0.5 * sin(lx * 0.4 + ly * 0.3 + t * 3.0));
+        }
+        c = blend(c, sky[min(top, HEIGHT - 1)], fog);
+        for y in top..ybuf[i] {
+          screen[y * WIDTH + i] = c;
+        }
+        ybuf[i] = top;
+      }
+      lx += stepx;
+      ly += stepy;
+    }
+    z += dz;
+    dz += 0.006;
+  }
+}

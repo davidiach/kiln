@@ -1,0 +1,42 @@
+// The Mandelbrot set, zooming forever into a spiral.
+// Each pixel iterates z = z*z + c up to a few hundred times,
+// at native WebAssembly speed. Smooth coloring hides the bands.
+
+let CX = -0.743643887037151;
+let CY = 0.131825904205330;
+
+fn palette(t: float) -> int {
+  return rgbf(0.5 + 0.5 * cos(TAU * (t + 0.0)),
+              0.5 + 0.5 * cos(TAU * (t + 0.1)),
+              0.5 + 0.5 * cos(TAU * (t + 0.2)));
+}
+
+fn frame(t: float) {
+  let phase = t % 36.0;             // zoom in for 36 seconds, then restart
+  let zoom = pow(1.45, phase);
+  let scale = 3.0 / (zoom * HEIGHT as float);
+  let max_iter = 120 + (phase * 12.0) as int;
+
+  for py in 0..HEIGHT {
+    let c_im = CY + (py - HEIGHT / 2) as float * scale;
+    for px in 0..WIDTH {
+      let c_re = CX + (px - WIDTH / 2) as float * scale;
+      var x = 0.0;
+      var y = 0.0;
+      var i = 0;
+      while i < max_iter && x * x + y * y < 256.0 {
+        let xt = x * x - y * y + c_re;
+        y = 2.0 * x * y + c_im;
+        x = xt;
+        i += 1;
+      }
+      if i == max_iter {
+        pixel(px, py, 0x000000);
+      } else {
+        // fractional iteration count -> no visible bands
+        let smooth = i as float + 1.0 - log(log(sqrt(x * x + y * y))) / log(2.0);
+        pixel(px, py, palette(smooth * 0.02 + t * 0.03));
+      }
+    }
+  }
+}
