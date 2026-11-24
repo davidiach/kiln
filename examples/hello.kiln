@@ -1,4 +1,5 @@
-// Welcome to Kiln!
+// Welcome to Kiln! New here? Press "Tour" at the top of the page for a
+// ten-minute guided tour that checks your work as you go.
 //
 // Kiln is a small, statically typed language. This page compiles it to
 // WebAssembly in your browser as you type: no server involved.

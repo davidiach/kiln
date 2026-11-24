@@ -43,6 +43,23 @@ npm run serve          # builds the playground and serves it at http://localhost
 Or run `npm run build` and open `dist/index.html` directly. It's a single self-contained file that works
 offline, from `file://`. There's nothing to install: the project has zero dependencies.
 
+### The guided tour
+
+New to Kiln? Press **Tour** in the playground (or open `#tour`). Eleven short lessons cover printing, types,
+drawing, loops, animation, input, functions, arrays, structs, sound, and finally the WebAssembly your code turns into.
+Each lesson explains one idea, gives you a starter program and sets one small task.
+
+![A lesson in the guided tour, checked off after drawing a house](docs/img/tour.jpg)
+
+You don't press a "check" button: the playground watches what your program *does* (what it prints, the pixels on
+screen, the sounds it makes, whether it reacts while you hold the mouse) and the lesson turns green as soon as the task
+is met. Because the checks look at behavior rather than your exact code, any working answer counts. You can skip
+around, peek at a solution and flip back to your own attempt. Progress and edits are saved in your browser.
+
+The lessons live in [`web/lessons.js`](web/lessons.js). Their checks are plain functions of a snapshot of the running
+program, so the test suite takes the tour headlessly: every starter must run *without* passing, and every solution
+(plus some alternative answers) must pass.
+
 The command-line tool runs on Node 20+:
 
 ```sh
@@ -218,7 +235,7 @@ source ──lex──▶ tokens ──parse──▶ AST ──check──▶ t
 | [`src/prelude.js`](src/prelude.js) | The standard library, in Kiln |
 | [`src/runtime.js`](src/runtime.js) | Host imports, readable trap messages, framebuffer to RGBA, sound events |
 | [`src/sound.js`](src/sound.js), [`src/synth.js`](src/synth.js) | The sound spec, and an offline synth with a WAV encoder |
-| [`web/`](web) | The playground: editor, worker runner with a watchdog, inspector tabs |
+| [`web/`](web) | The playground: editor, worker runner with a watchdog, audio, inspector tabs, the guided tour |
 | [`scripts/build.js`](scripts/build.js) | A 40-line bundler, then inlines everything into one HTML file |
 
 A few details I enjoyed:
@@ -268,7 +285,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 61 tests: language semantics, structs, sound, error messages, runtime traps, every example, the build
+npm test           # 79 tests: language semantics, structs, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -279,7 +296,7 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 ## Limits and ideas
 
 Kiln is deliberately small. There are no closures, methods, generics, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. Natural next steps would be a guided tour in the playground,
+modules; arrays are global and can't be passed around. Natural next steps would be methods on structs,
 `f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back to lines.
 
 ## License

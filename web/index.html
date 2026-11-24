@@ -21,6 +21,7 @@
   </a>
   <p class="tagline">A tiny typed language, compiled to WebAssembly as you type.</p>
   <div class="actions">
+    <button id="tour" title="A 10-minute guided tour of Kiln">Tour</button>
     <label class="sr" for="example">Example</label>
     <select id="example" title="Load an example"></select>
     <button id="run" class="primary" title="Run from the start (Ctrl+Enter)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Run</button>
@@ -30,6 +31,7 @@
 </header>
 
 <main class="app">
+  <section id="lesson" class="lesson" aria-label="Lesson" hidden></section>
   <section class="pane edit-pane" aria-label="Editor">
     <div class="pane-head">
       <span id="filename">hello.kiln</span>

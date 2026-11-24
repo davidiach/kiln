@@ -101,7 +101,15 @@ export class AudioEngine {
     }
   }
 
-  voice(ev, start) {
+  /** A short two-note chime for the UI (a finished lesson). */
+  chime() {
+    if (this.state !== 'on') return;
+    const t = this.ctx.currentTime + 0.02;
+    this.voice({ wave: 1, freq: 784, to: 784, dur: 0.3, vol: 0.3 }, t, this.master);
+    this.voice({ wave: 1, freq: 1175, to: 1175, dur: 0.45, vol: 0.3 }, t + 0.09, this.master);
+  }
+
+  voice(ev, start, dest = this.bus) {
     const ctx = this.ctx;
     const end = start + ev.dur;
     const { attack, hold } = envelopeTimes(ev.dur);
@@ -112,7 +120,7 @@ export class AudioEngine {
     env.gain.linearRampToValueAtTime(peak, start + attack);
     env.gain.setValueAtTime(peak, start + hold);
     env.gain.exponentialRampToValueAtTime(peak * FADE_FLOOR, end);
-    env.connect(this.bus);
+    env.connect(dest);
 
     let src;
     let pitch;

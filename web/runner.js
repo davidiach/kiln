@@ -48,6 +48,7 @@ export class Runner {
   start(compiled, { resetTime = true } = {}) {
     this.kill();
     this.audio?.reset();
+    this.stats = { startedAt: performance.now(), sounds: 0, maxSounds: 0 };
     if (resetTime) this.t0 = performance.now();
     this.program = { binary: compiled.binary, traps: compiled.traps, width: compiled.width, height: compiled.height };
     this.hasFrame = false;
@@ -61,6 +62,11 @@ export class Runner {
     this.kill();
     this.audio?.reset();
     this.setState('stopped');
+  }
+
+  /** Wall-clock seconds since the current program was (re)started. */
+  elapsed() {
+    return this.stats ? (performance.now() - this.stats.startedAt) / 1000 : 0;
   }
 
   /** The program's clock, in seconds. */
@@ -119,7 +125,11 @@ export class Runner {
   receive(msg) {
     this.busy = false;
     if (msg.lines?.length || msg.dropped) this.onPrint?.(msg.lines, msg.dropped);
-    if (msg.sounds?.length) this.audio?.play(msg.sounds, msg.t);
+    if (msg.sounds?.length) {
+      this.stats.sounds += msg.sounds.length;
+      this.stats.maxSounds = Math.max(this.stats.maxSounds, msg.sounds.length);
+      this.audio?.play(msg.sounds, msg.t);
+    }
     if (msg.pixels) {
       this.image.data.set(msg.pixels);
       this.ctx.putImageData(this.image, 0, 0);

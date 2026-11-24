@@ -5,6 +5,8 @@ import { createEditor } from './editor.js';
 import { Runner } from './runner.js';
 import { AudioEngine } from './audio.js';
 import { highlightWat, escapeHtml } from './highlight.js';
+import { createTour } from './tour.js';
+import { makeScreen } from './lessons.js';
 
 const $ = (s) => document.querySelector(s);
 const EXAMPLES = window.KILN_EXAMPLES ?? [];
@@ -30,7 +32,8 @@ const store = {
   },
 };
 
-let current = null; // { id, title, code }
+let current = null; // { id, title, code, filename? }
+let runLog = []; // lines printed by the current run, for the tour's checks
 let lastResult = null;
 let lastGood = null;
 let compileTimer = 0;
@@ -51,34 +54,54 @@ const runner = new Runner({
   onState: showState,
 });
 
-// ------------------------------------------------------------- examples
+// ------------------------------------------------------------- documents
 
-$('#example').innerHTML = EXAMPLES.map((e) => `<option value="${e.id}">${escapeHtml(e.title)}</option>`).join('');
+$('#example').innerHTML =
+  `<optgroup label="Learn"><option value="tour">Guided tour</option></optgroup>` +
+  `<optgroup label="Examples">${EXAMPLES.map((e) => `<option value="${e.id}">${escapeHtml(e.title)}</option>`).join('')}</optgroup>`;
 $('#example').addEventListener('change', () => {
   const id = $('#example').value;
-  loadExample(id);
-  try {
-    history.replaceState(null, '', '#' + id);
-  } catch {}
+  if (id === 'tour') openTour();
+  else loadExample(id);
 });
 
-function loadExample(id) {
-  const ex = EXAMPLES.find((e) => e.id === id) ?? EXAMPLES[0];
-  current = ex;
-  $('#example').value = ex.id;
-  $('#filename').textContent = `${ex.id}.kiln`;
-  editor.setValue(store.get(`kiln.draft.${ex.id}`) ?? ex.code);
+function setHash(h) {
+  try {
+    history.replaceState(null, '', '#' + h);
+  } catch {}
+}
+
+/** Load a document (example, lesson or shared program) into the editor and run it. */
+function openDoc(doc) {
+  current = doc;
+  $('#filename').textContent = doc.filename ?? `${doc.id}.kiln`;
+  editor.setValue(store.get(`kiln.draft.${doc.id}`) ?? doc.code);
   updateRevert();
   run(true);
 }
 
+function loadExample(id) {
+  const ex = EXAMPLES.find((e) => e.id === id) ?? EXAMPLES[0];
+  tour.close();
+  $('#example').value = ex.id;
+  setHash(ex.id);
+  openDoc(ex);
+}
+
 function loadCode(code, name) {
+  tour.close();
   current = { id: 'shared', title: name, code };
   $('#example').value = '';
   $('#filename').textContent = 'shared.kiln';
   editor.setValue(code);
   updateRevert();
   run(true);
+}
+
+function openTour(i) {
+  $('#example').value = 'tour';
+  tour.open(i);
+  setHash(tour.hash());
 }
 
 function updateRevert() {
@@ -95,6 +118,7 @@ $('#revert').addEventListener('click', () => {
 // ------------------------------------------------------------- compiling
 
 function onEdit(value) {
+  tour.noteEdit();
   if (current && current.id !== 'shared') {
     if (value === current.code) store.del(`kiln.draft.${current.id}`);
     else store.set(`kiln.draft.${current.id}`, value);
@@ -147,6 +171,7 @@ function run(resetTime) {
 
 function start(r, resetTime) {
   clearConsole();
+  tour.noteRestart();
   runner.start(r, { resetTime });
 }
 
@@ -190,6 +215,7 @@ function showState({ state, fps }) {
 
 function clearConsole() {
   $('#tab-console').innerHTML = '';
+  runLog = [];
 }
 
 function printLines(lines, dropped) {
@@ -198,6 +224,8 @@ function printLines(lines, dropped) {
   const frag = document.createDocumentFragment();
   if (dropped) frag.append(line(`… ${dropped} more lines not shown`, 'sys'));
   for (const l of lines) frag.append(line(l));
+  runLog.push(...lines);
+  if (runLog.length > 1000) runLog.splice(0, runLog.length - 1000);
   box.append(frag);
   while (box.childElementCount > MAX_CONSOLE_LINES) box.firstElementChild.remove();
   if (nearBottom) box.scrollTop = box.scrollHeight;
@@ -293,6 +321,7 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
 
 function selectTab(name) {
   activeTab = name;
+  tour?.noteTab(name);
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   document.querySelectorAll('.tab').forEach((t) => (t.hidden = t.id !== `tab-${name}`));
   refreshTab();
@@ -396,10 +425,59 @@ async function decode(data) {
   return new TextDecoder().decode(await new Response(stream).arrayBuffer());
 }
 
+// ------------------------------------------------------------- tour
+
+const tour = createTour({
+  root: $('#lesson'),
+  store,
+  api: {
+    open(doc) {
+      openDoc(doc);
+      setHash(tour.hash());
+    },
+    getCode: () => editor.value,
+    setCode(code) {
+      editor.setValue(code);
+      if (code === current.code) store.del(`kiln.draft.${current.id}`);
+      else store.set(`kiln.draft.${current.id}`, code);
+      updateRevert();
+      run(true);
+    },
+    context: tourContext,
+    activeTab: () => activeTab,
+    exit: () => loadExample('hello'),
+    example: (id) => loadExample(id),
+    celebrate: () => audio.chime(),
+  },
+});
+
+$('#tour').addEventListener('click', () => openTour());
+
+/** What the running program is doing right now, for the lesson checks. */
+function tourContext() {
+  if (!lastResult?.ok || runner.state === 'error' || runner.state === 'stopped') return null;
+  const pixels = $('#screen').getContext('2d').getImageData(0, 0, 320, 240).data;
+  const i = runner.input;
+  return {
+    source: editor.value,
+    output: runLog.slice(),
+    screen: makeScreen(pixels),
+    input: { mouseX: i.mouseX, mouseY: i.mouseY, mouseDown: i.mouseDown },
+    elapsed: runner.elapsed(),
+    sounds: runner.stats?.sounds ?? 0,
+    maxSounds: runner.stats?.maxSounds ?? 0,
+  };
+}
+
 // ------------------------------------------------------------- boot
 
 async function route() {
   const h = decodeURIComponent(location.hash.slice(1));
+  if (h === 'tour' || h.startsWith('tour-')) {
+    const i = tour.indexFor(h);
+    if (!(tour.active && tour.hash() === `tour-${i + 1}`)) openTour(i);
+    return;
+  }
   if (h.startsWith('s=')) {
     try {
       loadCode(await decode(h.slice(2)), 'Shared program');
@@ -408,7 +486,7 @@ async function route() {
       /* fall through to the default example */
     }
   }
-  if (current && current.id === h) return;
+  if (current && current.id === h && !tour.active) return;
   loadExample(EXAMPLES.some((e) => e.id === h) ? h : 'hello');
 }
 
