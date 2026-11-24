@@ -87,3 +87,7 @@ test('reports several type errors at once', () => {
   assert.equal(r.errors.length, 3);
   assert.deepEqual(r.errors.map((e) => e.span.line), [2, 3, 4]);
 });
+
+test('an array sized by its own length is reported, not crashed on', () => {
+  has(errors('var a: [int; len(a)];\nfn main() { print(len(a)); }'), /size of array 'a' depends on itself/);
+});

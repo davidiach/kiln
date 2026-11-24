@@ -119,7 +119,7 @@ class Checker {
       sym = { kind: 'const', name, decl: item, origin, state: 'pending', type: 'error', value: undefined, untyped: false };
       this.consts.push(sym);
     } else if (isArrayDecl(item)) {
-      sym = { kind: 'array', name, decl: item, origin, mutable: item.mutable, elem: 'error', size: 0, init: null };
+      sym = { kind: 'array', name, decl: item, origin, mutable: item.mutable, elem: 'error', size: 0, init: null, state: 'pending' };
       this.arrays.push(sym);
     } else {
       sym = { kind: 'global', name, decl: item, origin, type: 'error', value: undefined };
@@ -243,7 +243,20 @@ class Checker {
     });
   }
 
+  /** Resolve an array's type and size (on demand, so declaration order doesn't matter). */
   resolveArray(sym) {
+    if (sym.state === 'done') return sym.elem !== 'error';
+    if (sym.state === 'busy') {
+      this.err(`the size of array '${sym.name}' depends on itself`, sym.decl.span);
+      return false;
+    }
+    sym.state = 'busy';
+    this.resolveArrayNow(sym);
+    sym.state = 'done';
+    return sym.elem !== 'error';
+  }
+
+  resolveArrayNow(sym) {
     this.inConstContext(sym.origin, () => {
       const d = sym.decl;
       let elem = null;
@@ -950,6 +963,7 @@ class Checker {
     if (a.kind === 'Ident') {
       const sym = this.lookup(a.name);
       if (sym && sym.kind === 'array') {
+        if (!this.resolveArray(sym)) return 'error';
         e.lenOf = sym;
         return 'int';
       }

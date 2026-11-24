@@ -68,9 +68,14 @@ class Generator {
       globalLeaves += leafTypes(g.type).length;
     }
 
-    // ---- linear memory layout: arrays first (prelude's `screen` lands at 0), then strings
+    // ---- linear memory layout
+    // Bytes 0..7 stay zero: read as a string, address 0 is [len = 0], so every
+    // zero-initialized str (a local without a value, a field of a fresh
+    // struct, an element of a fresh array) is a valid empty string.
+    // Arrays come next, then string literals.
     this.arrays = ck.arrays.filter((a) => usedArrays.has(a));
-    let addr = 0;
+    this.strings.set('', 0);
+    let addr = 8;
     const inits = [];
     for (const a of this.arrays) {
       a.addr = align(addr, 8);
@@ -1025,13 +1030,22 @@ class FnGen {
       return;
     }
     switch (e.builtin) {
-      case 'print':
+      case 'print': {
+        // Evaluate every argument before printing anything: an argument may
+        // call a function that prints, and the host builds one line at a time.
+        const vals = e.args.map((a) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a)));
         e.args.forEach((a, i) => {
           if (i) this.printText(' ');
-          this.printValue(a);
+          if (vals[i]) this.printLeaves(a.type, vals[i].locals);
+          else {
+            this.expr(a);
+            this.callImport(`__print_${a.type[0]}`);
+          }
         });
         this.callImport('__print_end');
+        for (const v of vals) if (v) this.release(...v.temps);
         return;
+      }
       case 'select':
         this.expr(e.args[1]);
         this.expr(e.args[2]);
@@ -1057,15 +1071,13 @@ class FnGen {
     this.callImport('__print_s');
   }
 
-  printValue(a) {
-    if (!isStruct(a.type)) {
-      this.expr(a);
-      this.callImport(`__print_${a.type[0]}`);
-      return;
+  printLeaves(type, locals) {
+    if (isStruct(type)) {
+      this.printStruct(type, locals, 0);
+    } else {
+      this.emit('local.get', locals[0]);
+      this.callImport(`__print_${type[0]}`);
     }
-    const v = this.materialize(a);
-    this.printStruct(a.type, v.locals, 0);
-    this.release(...v.temps);
   }
 
   /** Prints like the constructor call that would make it: Vec3(1.0, 2.0, 3.0) */

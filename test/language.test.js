@@ -163,3 +163,29 @@ test('exported functions', async () => {
   assert.equal(inst.exports.add(2, 40), 42);
   assert.equal(inst.exports.half(5), 2.5);
 });
+
+// Regressions from code review on PR #1.
+
+test('strings without a value are empty, wherever they live', async () => {
+  // Locals, struct fields and array elements start zeroed; address 0 is a valid empty string.
+  const src = `
+    struct Named { name: str, n: int }
+    var people: [Named; 3];
+    fn main() {
+      print("hello");
+      var s: str;
+      var x: Named;
+      print(len(s), len(x.name), len(people[2].name), "[", s, "]");
+    }`;
+  assert.deepEqual(await run(src), ['hello', '0 0 0 [  ]']);
+});
+
+test('len() of an array declared later', async () => {
+  const src = 'const N = len(values);\nlet values = [1, 2, 3];\nvar copy: [int; N];\nfn main() { print(N, len(values), len(copy)); }';
+  assert.deepEqual(await run(src), ['3 3 3']);
+});
+
+test('a print inside a print argument prints first, as its own line', async () => {
+  const src = 'fn value() -> int { print("inner"); return 7; }\nfn main() { print("outer", value(), "end"); }';
+  assert.deepEqual(await run(src), ['inner', 'outer 7 end']);
+});
