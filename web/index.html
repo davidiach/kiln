@@ -69,7 +69,21 @@ const N = 64;         // compile-time constant
 var grid: [int; N * N];   // arrays live at top level
 let pal = [0xff0000, 0x00ff00];
 let s = "text";       // strings: len(s), s[i] gives a byte</pre>
-        <p>Types: <code>int</code> (32-bit), <code>float</code> (64-bit), <code>bool</code>, <code>str</code>. Nothing converts silently: write <code>x as float</code>. Integer literals do adapt to floats, so <code>x * 2</code> works.</p>
+        <p>Types: <code>int</code> (32-bit), <code>float</code> (64-bit), <code>bool</code>, <code>str</code>, and your own structs. Nothing converts silently: write <code>x as float</code>. Integer literals do adapt to floats, so <code>x * 2</code> works.</p>
+        <h3>Structs</h3>
+        <pre>struct Vec2 { x: float, y: float }
+struct Ball { pos: Vec2, vel: Vec2, color: int }
+
+var balls: [Ball; 64];          // arrays of structs
+const UP = Vec2(0.0, 1.0);      // built like a call
+
+fn length(v: Vec2) -> float { return sqrt(v.x * v.x + v.y * v.y); }
+
+var b = Ball(Vec2(10, 20), UP * 3.0, 0xff8800);
+b.pos += b.vel * dt;            // component-wise math
+balls[0] = b;                   // structs are values: this copies
+balls[0].vel.y -= 1.0;</pre>
+        <p>Structs whose fields are all floats (or all ints) support <code>+ - * / %</code> with each other and with a single number. Any struct supports <code>==</code> and <code>!=</code>. <code>print(v)</code> shows <code>Vec2(1.0, 2.0)</code>.</p>
         <h3>Control flow</h3>
         <pre>if a &lt; b { } else if c { } else { }
 while cond { break; continue; }
@@ -80,7 +94,7 @@ let m = a &gt; b ? a : b;</pre>
         <p><code>+ - * / %</code> · <code>== != &lt; &lt;= &gt; &gt;=</code> · <code>&amp;&amp; || !</code> · <code>&amp; | ^ ~ &lt;&lt; &gt;&gt; &gt;&gt;&gt;</code> · compound <code>+=</code> etc. Bitwise operators bind tighter than comparisons.</p>
         <h3>Built in</h3>
         <dl>
-          <dt>Math</dt><dd>sqrt floor ceil trunc round abs min max clamp sin cos tan asin acos atan atan2 exp log pow fract mix smoothstep sign length</dd>
+          <dt>Math</dt><dd>sqrt floor ceil trunc round abs min max clamp sin cos tan asin acos atan atan2 exp log pow fract mix smoothstep sign</dd>
           <dt>Drawing</dt><dd>pixel(x, y, c) · get_pixel(x, y) · clear(c) · rect(x, y, w, h, c) · circle(x, y, r, c) · line(x0, y0, x1, y1, c) · the <code>screen</code> array</dd>
           <dt>Color</dt><dd>rgb(r, g, b) with ints 0..255 · rgbf(r, g, b) with floats 0..1 · hsv(h, s, v) · blend(a, b, t)</dd>
           <dt>Text</dt><dd>text(x, y, s, c) · text_big(x, y, s, size, c) · number(x, y, n, c) · text_width(s) · print(a, b, ...)</dd>

@@ -209,10 +209,6 @@ fn sign(x: float) -> float {
   return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0);
 }
 
-fn length(x: float, y: float) -> float {
-  return sqrt(x * x + y * y);
-}
-
 // ---- deterministic randomness
 
 fn hash(n: int) -> int {

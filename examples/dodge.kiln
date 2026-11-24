@@ -2,16 +2,14 @@
 // Steer with the arrow keys (or the mouse). Catch the gold stars,
 // dodge the rocks. Things speed up as you go. SPACE restarts.
 
+struct Vec2 { x: float, y: float }
+struct Rock { pos: Vec2, radius: int, speed: float }
+struct Star { pos: Vec2, speed: float }
+
 const ROCKS = 14;
 const STARS = 6;
-
-var rock_x: [float; ROCKS];
-var rock_y: [float; ROCKS];
-var rock_r: [int; ROCKS];
-var rock_v: [float; ROCKS];
-var star_x: [float; STARS];
-var star_y: [float; STARS];
-var star_v: [float; STARS];
+var rocks: [Rock; ROCKS];
+var stars: [Star; STARS];
 
 var ship_x = 160.0;
 var score = 0;
@@ -22,22 +20,20 @@ var last_t = 0.0;
 var last_mouse = 0;
 var flash = 0.0;
 
-fn reset_rock(i: int, top: bool) {
-  rock_r[i] = 5 + (rand() * 9.0) as int;
-  rock_x[i] = rand() * WIDTH as float;
-  rock_y[i] = top ? -20.0 - rand() * 80.0 : -rand() * 300.0;
-  rock_v[i] = 40.0 + rand() * 50.0;
+// A rock somewhere above the screen. At the start of a game they're spread
+// further up, so they don't all arrive at once.
+fn new_rock(first_wave: bool) -> Rock {
+  let y = first_wave ? -rand() * 300.0 : -20.0 - rand() * 80.0;
+  return Rock(Vec2(rand() * WIDTH as float, y), 5 + (rand() * 9.0) as int, 40.0 + rand() * 50.0);
 }
 
-fn reset_star(i: int) {
-  star_x[i] = 10.0 + rand() * 300.0;
-  star_y[i] = -10.0 - rand() * 250.0;
-  star_v[i] = 50.0 + rand() * 30.0;
+fn new_star() -> Star {
+  return Star(Vec2(10.0 + rand() * 300.0, -10.0 - rand() * 250.0), 50.0 + rand() * 30.0);
 }
 
 fn restart() {
-  for i in 0..ROCKS { reset_rock(i, false); }
-  for i in 0..STARS { reset_star(i); }
+  for i in 0..ROCKS { rocks[i] = new_rock(true); }
+  for i in 0..STARS { stars[i] = new_star(); }
   score = 0;
   speed = 1.0;
   alive = true;
@@ -89,14 +85,16 @@ fn frame(t: float) {
   let sy = 212;
 
   for i in 0..ROCKS {
-    rock_y[i] += rock_v[i] * speed * dt;
-    if rock_y[i] > HEIGHT as float + 20.0 {
-      reset_rock(i, true);
+    var rock = rocks[i];
+    rock.pos.y += rock.speed * speed * dt;
+    if rock.pos.y > HEIGHT as float + 20.0 {
+      rock = new_rock(false);
       if alive { score += 1; }
     }
-    let rx = rock_x[i] as int;
-    let ry = rock_y[i] as int;
-    let r = rock_r[i];
+    rocks[i] = rock;
+    let rx = rock.pos.x as int;
+    let ry = rock.pos.y as int;
+    let r = rock.radius;
     circle(rx, ry, r, 0x6b5a4e);
     circle(rx - r / 3, ry - r / 3, r / 3, 0x8a7766);
     // collision with the ship's body
@@ -110,10 +108,10 @@ fn frame(t: float) {
   }
 
   for i in 0..STARS {
-    star_y[i] += star_v[i] * speed * dt;
-    if star_y[i] > HEIGHT as float + 10.0 { reset_star(i); }
-    let x = star_x[i] as int;
-    let y = star_y[i] as int;
+    stars[i].pos.y += stars[i].speed * speed * dt;
+    if stars[i].pos.y > HEIGHT as float + 10.0 { stars[i] = new_star(); }
+    let x = stars[i].pos.x as int;
+    let y = stars[i].pos.y as int;
     let twinkle = 0.75 + 0.25 * sin(t * 10.0 + i as float);
     let c = rgbf(1.0 * twinkle, 0.85 * twinkle, 0.2);
     rect(x - 1, y - 3, 3, 7, c);
@@ -121,7 +119,7 @@ fn frame(t: float) {
     if alive && abs(x - sx) < 9 && abs(y - (sy + 6)) < 10 {
       score += 10;
       flash = 0.35;
-      reset_star(i);
+      stars[i] = new_star();
     }
   }
 

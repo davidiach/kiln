@@ -360,6 +360,15 @@ class FnGen {
   emit(name, ...args) {
     const def = OPS[name];
     if (!def) throw new Error(`unknown opcode ${name}`);
+    // Peephole: `local.set x; local.get x` is exactly `local.tee x`.
+    const prev = this.prev;
+    if (name === 'local.get' && prev && prev.name === 'local.set' && prev.arg === args[0]) {
+      this.code.bytes[prev.pos] = OPS['local.tee'][0];
+      this.lines[prev.line] = this.lines[prev.line].replace('local.set', 'local.tee');
+      this.prev = null;
+      return;
+    }
+    this.prev = { name, arg: args[0], pos: this.code.length, line: this.lines.length };
     if (name === 'end' || name === 'else') this.depth--;
     let text = name;
     for (const part of def) {

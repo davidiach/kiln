@@ -1,45 +1,59 @@
 // Ray marching: a 3D scene described entirely by distance functions.
-// No triangles and no GPU, just math compiled to WebAssembly.
+// No triangles and no GPU, just vector math compiled to WebAssembly.
+// Vec3 is an ordinary struct; +, -, * and / work on it component-wise.
 // Rendered at half resolution (2x2 pixels) to keep it smooth.
 
-var cam_x = 0.0;  var cam_y = 0.0;  var cam_z = 0.0;
-var fwd_x = 0.0;  var fwd_y = 0.0;  var fwd_z = 0.0;
-var right_x = 0.0; var right_z = 0.0;
-var up_x = 0.0;   var up_y = 0.0;   var up_z = 0.0;
+struct Vec3 { x: float, y: float, z: float }
+
+fn dot(a: Vec3, b: Vec3) -> float { return a.x * b.x + a.y * b.y + a.z * b.z; }
+fn length(v: Vec3) -> float { return sqrt(dot(v, v)); }
+fn normalize(v: Vec3) -> Vec3 { return v / length(v); }
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+  return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+const SUN = Vec3(0.577, 0.577, -0.577);   // unit vector toward the light
+const UP = Vec3(0.0, 1.0, 0.0);
 var time = 0.0;
 
-// Sun direction (normalized).
-let SUN_X = 0.577;
-let SUN_Y = 0.577;
-let SUN_Z = -0.577;
-
+// Smooth minimum: blends two shapes together where they meet.
 fn smin(a: float, b: float, k: float) -> float {
   let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
   return mix(b, a, h) - k * h * (1.0 - h);
 }
 
-fn blob(x: float, y: float, z: float) -> float {
-  let bob = 0.25 * sin(time * 2.0);
-  let sphere = sqrt(x * x + (y - bob) * (y - bob) + z * z) - 0.75;
-  // A torus tumbling around the sphere.
+fn blob(p: Vec3) -> float {
+  let sphere = length(p - Vec3(0.0, 0.25 * sin(time * 2.0), 0.0)) - 0.75;
+  // A torus tumbling around the sphere: rotate p about the x axis.
   let c = cos(time);
   let s = sin(time);
-  let ty = y * c - z * s;
-  let tz = y * s + z * c;
-  let ring = length(length(x, tz) - 1.35, ty) - 0.18;
+  let q = Vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+  let around = sqrt(q.x * q.x + q.z * q.z) - 1.35;
+  let ring = sqrt(around * around + q.y * q.y) - 0.18;
   return smin(sphere, ring, 0.35);
 }
 
-fn scene(x: float, y: float, z: float) -> float {
-  return min(y + 1.0, blob(x, y, z));
+// Distance from p to the nearest surface: the floor or the blob.
+fn scene(p: Vec3) -> float {
+  return min(p.y + 1.0, blob(p));
+}
+
+// Surface normal from four samples (the tetrahedron technique).
+fn normal(p: Vec3) -> Vec3 {
+  let e = 0.001;
+  let a = scene(p + Vec3(e, -e, -e));
+  let b = scene(p + Vec3(-e, -e, e));
+  let c = scene(p + Vec3(-e, e, -e));
+  let d = scene(p + Vec3(e, e, e));
+  return normalize(Vec3(a - b - c + d, -a - b + c + d, -a + b - c + d));
 }
 
 // March toward the light; the closest miss gives a soft shadow edge.
-fn shadow(x: float, y: float, z: float) -> float {
+fn shadow(p: Vec3) -> float {
   var res = 1.0;
   var d = 0.05;
   for i in 0..32 {
-    let h = scene(x + SUN_X * d, y + SUN_Y * d, z + SUN_Z * d);
+    let h = scene(p + SUN * d);
     res = min(res, 8.0 * h / d);
     d += clamp(h, 0.02, 0.4);
     if res < 0.01 || d > 6.0 { break; }
@@ -47,102 +61,58 @@ fn shadow(x: float, y: float, z: float) -> float {
   return clamp(res, 0.0, 1.0);
 }
 
-fn trace(u: float, v: float) -> int {
-  var dx = fwd_x + u * right_x + v * up_x;
-  var dy = fwd_y + v * up_y;
-  var dz = fwd_z + u * right_z + v * up_z;
-  let inv = 1.0 / sqrt(dx * dx + dy * dy + dz * dz);
-  dx *= inv;
-  dy *= inv;
-  dz *= inv;
+fn sky(dir: Vec3) -> Vec3 {
+  return Vec3(0.30, 0.48, 0.90) - Vec3(0.25, 0.30, 0.20) * dir.y;
+}
 
+fn shade(eye: Vec3, dir: Vec3) -> Vec3 {
   var d = 0.0;
   var hit = false;
   for i in 0..80 {
-    let h = scene(cam_x + dx * d, cam_y + dy * d, cam_z + dz * d);
+    let h = scene(eye + dir * d);
     if h < 0.001 { hit = true; break; }
     d += h;
     if d > 25.0 { break; }
   }
+  if !hit { return sky(dir); }
 
-  let sky_r = 0.55 - dy * 0.4;
-  let sky_g = 0.70 - dy * 0.4;
-  let sky_b = 0.95 - dy * 0.2;
-  if !hit { return rgbf(sky_r, sky_g, sky_b); }
-
-  let px = cam_x + dx * d;
-  let py = cam_y + dy * d;
-  let pz = cam_z + dz * d;
-
-  // Surface normal from four samples (tetrahedron technique).
-  let e = 0.001;
-  let a = scene(px + e, py - e, pz - e);
-  let b = scene(px - e, py - e, pz + e);
-  let c = scene(px - e, py + e, pz - e);
-  let k = scene(px + e, py + e, pz + e);
-  var nx = a - b - c + k;
-  var ny = -a - b + c + k;
-  var nz = -a + b - c + k;
-  let nl = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
-  nx *= nl;
-  ny *= nl;
-  nz *= nl;
-
-  var r = 0.0;
-  var g = 0.0;
-  var bl = 0.0;
-  if py < -0.999 {
-    // checkerboard floor
-    let check = ((floor(px) + floor(pz)) as int) & 1;
-    let base = check == 0 ? 0.85 : 0.35;
-    r = base; g = base; bl = base * 1.05;
-  } else {
-    let glow = 0.5 + 0.5 * sin(py * 4.0 + time * 2.0);
-    r = 0.95; g = 0.35 + 0.25 * glow; bl = 0.25;
+  let p = eye + dir * d;
+  let n = normal(p);
+  var albedo = Vec3(0.95, 0.35 + 0.25 * (0.5 + 0.5 * sin(p.y * 4.0 + time * 2.0)), 0.25);
+  if p.y < -0.999 {
+    let check = ((floor(p.x) + floor(p.z)) as int) & 1;
+    albedo = check == 0 ? Vec3(0.85, 0.85, 0.9) : Vec3(0.35, 0.35, 0.37);
   }
 
-  let diffuse = max(nx * SUN_X + ny * SUN_Y + nz * SUN_Z, 0.0) * shadow(px + nx * 0.01, py + ny * 0.01, pz + nz * 0.01);
-  let ambient = 0.25 + 0.15 * ny;
-  let light = diffuse * 0.9 + ambient;
-
-  // Specular highlight.
-  let hx = SUN_X - dx; let hy = SUN_Y - dy; let hz = SUN_Z - dz;
-  let hl = 1.0 / sqrt(hx * hx + hy * hy + hz * hz);
-  let spec = pow(max((nx * hx + ny * hy + nz * hz) * hl, 0.0), 40.0) * diffuse;
-
+  let diffuse = max(dot(n, SUN), 0.0) * shadow(p + n * 0.01);
+  let light = diffuse * 0.9 + 0.25 + 0.15 * n.y;
+  let spec = pow(max(dot(n, normalize(SUN - dir)), 0.0), 40.0) * diffuse;
   let fog = 1.0 - exp(-0.0025 * d * d);
-  r = mix(r * light + spec, sky_r, fog);
-  g = mix(g * light + spec, sky_g, fog);
-  bl = mix(bl * light + spec, sky_b, fog);
-  return rgbf(sqrt(clamp(r, 0.0, 1.0)), sqrt(clamp(g, 0.0, 1.0)), sqrt(clamp(bl, 0.0, 1.0)));
+  let lit = albedo * light + spec;
+  return lit + (sky(dir) - lit) * fog;
+}
+
+fn to_color(c: Vec3) -> int {
+  // sqrt is a cheap gamma correction
+  return rgbf(sqrt(clamp(c.x, 0.0, 1.0)), sqrt(clamp(c.y, 0.0, 1.0)), sqrt(clamp(c.z, 0.0, 1.0)));
 }
 
 fn frame(t: float) {
   time = t;
   // Orbit the camera around the origin, looking at it.
   let angle = t * 0.25;
-  cam_x = 4.2 * sin(angle);
-  cam_y = 1.1;
-  cam_z = -4.2 * cos(angle);
-  let inv = 1.0 / sqrt(cam_x * cam_x + cam_y * cam_y + cam_z * cam_z);
-  fwd_x = -cam_x * inv;
-  fwd_y = -cam_y * inv;
-  fwd_z = -cam_z * inv;
-  // right = normalize(cross(up, forward)) with up = (0, 1, 0)
-  let rl = 1.0 / sqrt(fwd_z * fwd_z + fwd_x * fwd_x);
-  right_x = fwd_z * rl;
-  right_z = -fwd_x * rl;
-  // up = cross(forward, right)
-  up_x = fwd_y * right_z;
-  up_y = fwd_z * right_x - fwd_x * right_z;
-  up_z = -fwd_y * right_x;
+  let eye = Vec3(4.2 * sin(angle), 1.1, -4.2 * cos(angle));
+  let forward = normalize(-eye);
+  let right = normalize(cross(UP, forward));
+  let up = cross(forward, right);
 
   let aspect = WIDTH as float / HEIGHT as float;
   for py in 0..HEIGHT / 2 {
     let v = 1.0 - py as float / (HEIGHT / 4) as float;
     for px in 0..WIDTH / 2 {
       let u = (px as float / (WIDTH / 4) as float - 1.0) * aspect;
-      rect(px * 2, py * 2, 2, 2, trace(u * 0.75, v * 0.75));
+      let dir = normalize(forward + right * (u * 0.75) + up * (v * 0.75));
+      rect(px * 2, py * 2, 2, 2, to_color(shade(eye, dir)));
     }
   }
 }

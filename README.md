@@ -2,7 +2,7 @@
 
 **A tiny statically typed language that compiles straight to WebAssembly, with a live-coding pixel playground.**
 
-Kiln's compiler is under 3,000 lines of dependency-free JavaScript. It lexes, parses, type-checks and
+Kiln's compiler is about 3,300 lines of dependency-free JavaScript. It lexes, parses, type-checks and
 then writes the WebAssembly binary *byte by byte*: no LLVM, no Binaryen, no `wat2wasm`. It is fast
 enough to recompile on every keystroke, so the playground feels like a fantasy console: type
 code on the left and watch it run at native speed on a 320×240 screen on the right.
@@ -89,7 +89,7 @@ fn main() {
 }
 ```
 
-- **Types:** `int` (i32), `float` (f64), `bool`, `str`, plus fixed-size global arrays of `int`, `float` or `bool`.
+- **Types:** `int` (i32), `float` (f64), `bool`, `str`, structs, and fixed-size global arrays of any of those except `str`.
 - **No silent conversions.** `int + float` is an error that suggests `as float`. One concession for
   comfort: integer *literals* (and untyped integer constants) adapt to float context, so `x * 2` works when `x` is a float.
 - **`let` is immutable, `var` is mutable.** Assigning to a `let` is a compile error with a fix-it hint.
@@ -101,6 +101,58 @@ fn main() {
 - **The standard prelude is written in Kiln** ([`src/prelude.js`](src/prelude.js)): `pixel`, `rect`, `circle`, Bresenham
   `line`, `hsv`, `blend`, a 3×5 bitmap font for `text` and `number`, integer `hash`, value `noise` and `fbm`.
   It's compiled together with your program, and whatever you don't use is stripped.
+
+### Structs
+
+```rust
+struct Vec2 { x: float, y: float }
+struct Ball { pos: Vec2, vel: Vec2, color: int }
+
+const GRAVITY = Vec2(0.0, 260.0);   // constructed like a call, folded at compile time
+var balls: [Ball; 100];             // arrays of structs
+
+fn length(v: Vec2) -> float { return sqrt(v.x * v.x + v.y * v.y); }
+
+fn step(dt: float) {
+  for i in 0..len(balls) {
+    var b = balls[i];               // structs are values: this is a copy
+    b.vel += GRAVITY * dt;          // component-wise math
+    b.pos += b.vel * dt;
+    if b.pos.y > 239.0 { b.vel.y *= -0.8; }
+    balls[i] = b;                   // write it back
+  }
+}
+```
+
+- Structs are **values**, like numbers: assigning or passing one copies it. There are no pointers and no heap.
+- Structs whose fields are all floats (or all ints) get **component-wise** `+ - * / %`, with each other or with a
+  single number on either side, GLSL-style. Any struct supports `==` and `!=`.
+- `print(v)` shows a struct the way you'd construct it: `Ball(Vec2(1.0, 2.0), Vec2(0.0, 0.0), 16746496)`.
+
+Under the hood, a struct is **flattened into its scalar fields**. A `Vec2` local is two wasm locals, a `Vec2` parameter
+is two wasm parameters, and a function returning one uses wasm's multi-value returns. So vector math costs exactly what
+the scalar version would. This function:
+
+```rust
+export fn add(a: Vec2, b: Vec2) -> Vec2 { return a + b; }
+```
+
+compiles to two additions, with no memory traffic and no temporaries:
+
+```wasm
+(func $add (export "add") (param $a.x f64) (param $a.y f64) (param $b.x f64) (param $b.y f64) (result f64 f64)
+  local.get $a.x
+  local.get $b.x
+  f64.add
+  local.get $a.y
+  local.get $b.y
+  f64.add
+  return
+)
+```
+
+Arrays of structs are laid out in linear memory with natural alignment, and `balls[i].vel.y` compiles to one bounds
+check plus a single `f64.load` at a constant offset.
 
 ### Friendly errors
 
@@ -132,6 +184,7 @@ source ──lex──▶ tokens ──parse──▶ AST ──check──▶ t
 | [`src/lexer.js`](src/lexer.js) | Tokens with spans; hex/binary/underscored literals, escapes, block comments |
 | [`src/parser.js`](src/parser.js) | Recursive descent for statements, precedence climbing for expressions |
 | [`src/checker.js`](src/checker.js) | Name resolution, type inference and checking, constant folding, definite-return analysis, call graph |
+| [`src/types.js`](src/types.js) | Struct flattening and memory layout |
 | [`src/codegen.js`](src/codegen.js) | Emits wasm instructions and a matching WAT listing side by side; strips dead code |
 | [`src/wasm.js`](src/wasm.js) | LEB128, section encoding, the opcode table |
 | [`src/prelude.js`](src/prelude.js) | The standard library, in Kiln |
@@ -146,6 +199,8 @@ A few details I enjoyed:
 - **Dead code elimination falls out of the checker.** Each function records what it calls and which globals, arrays
   and imports it touches. Codegen walks that graph from `main`/`frame`/exports, so the plasma example ships 5 functions
   and strips the other 22, and imports only the 3 host functions it uses (`sin`, `cos`, and the trap hook).
+- **Fields are places, not values.** Codegen resolves `a.b.c` and `arr[i].pos.x` to a *place* (a run of locals, a run of
+  globals, or a base address plus a constant offset) and loads or stores only the leaves it needs.
 - **Arrays use the memarg offset.** `grid[i]` compiles to `i32.load offset=<grid's address>` with the scaled index on the
   stack, after a single unsigned compare for the bounds check (which also catches negative indices).
 - **Traps know where they came from.** Bounds and division checks call an imported `__trap(site, value)`; the site
@@ -184,7 +239,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 35 tests: language semantics, error messages, runtime traps, every example, the build
+npm test           # 49 tests: language semantics, structs, error messages, runtime traps, every example, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -194,10 +249,9 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 
 ## Limits and ideas
 
-Kiln is deliberately small. There are no structs, closures, heap allocation, string concatenation or modules, and
-arrays can't be passed around. Natural next steps would be structs (lowered to memory or multi-value), `f32`/SIMD for
-faster shading, a register-allocating pass to reuse locals, sound via an audio worklet, and source maps from wasm
-offsets back to lines.
+Kiln is deliberately small. There are no closures, methods, generics, heap allocation, string concatenation or
+modules; arrays are global and can't be passed around. Natural next steps would be sound via an audio worklet,
+`f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back to lines.
 
 ## License
 
