@@ -11,16 +11,16 @@ permissions:
   pages: write
   id-token: write
 
+# One deployment at a time. A new push queues behind a running deployment
+# instead of cancelling it halfway.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  deploy:
+  # Test, build, and upload the site as the "github-pages" artifact.
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,5 +32,16 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
+
+  # Deploy in a separate job. deploy-pages looks the artifact up through the
+  # API, which can lag behind an upload made moments earlier in the same job;
+  # by the time a separate job starts, the artifact is listed reliably.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
