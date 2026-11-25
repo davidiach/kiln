@@ -11,21 +11,24 @@ const S = 'str';
 const F4 = 'f32x4';
 const I4 = 'i32x4';
 const B4 = 'boolx4';
+const F2 = 'f64x2';
+const B2 = 'boolx2';
 
 // Each entry lists overloads: [[param types], result]. The vector versions
 // work lane by lane; a scalar argument next to vectors fills all four lanes.
 export const INTRINSICS = {
-  sqrt: [[[F], F], [[F4], F4]],
-  floor: [[[F], F], [[F4], F4]],
-  ceil: [[[F], F], [[F4], F4]],
-  trunc: [[[F], F], [[F4], F4]],
-  round: [[[F], F], [[F4], F4]],
-  abs: [[[F], F], [[I], I], [[F4], F4], [[I4], I4]],
-  min: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4]],
-  max: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4]],
-  clamp: [[[F, F, F], F], [[I, I, I], I], [[F4, F4, F4], F4], [[F4, F, F], F4], [[I4, I4, I4], I4], [[I4, I, I], I4]],
-  any: [[[B4], B]],
-  all: [[[B4], B]],
+  sqrt: [[[F], F], [[F4], F4], [[F2], F2]],
+  floor: [[[F], F], [[F4], F4], [[F2], F2]],
+  ceil: [[[F], F], [[F4], F4], [[F2], F2]],
+  trunc: [[[F], F], [[F4], F4], [[F2], F2]],
+  round: [[[F], F], [[F4], F4], [[F2], F2]],
+  abs: [[[F], F], [[I], I], [[F4], F4], [[I4], I4], [[F2], F2]],
+  min: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4], [[F2, F2], F2], [[F2, F], F2]],
+  max: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4], [[F2, F2], F2], [[F2, F], F2]],
+  clamp: [[[F, F, F], F], [[I, I, I], I], [[F4, F4, F4], F4], [[F4, F, F], F4], [[I4, I4, I4], I4], [[I4, I, I], I4],
+    [[F2, F2, F2], F2], [[F2, F, F], F2]],
+  any: [[[B4], B], [[B2], B]],
+  all: [[[B4], B], [[B2], B]],
   // Reinterpret the same 128 bits: an f32x4's IEEE 754 bit patterns as ints, and back.
   to_bits: [[[F4], I4]],
   from_bits: [[[I4], F4]],

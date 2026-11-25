@@ -15,7 +15,7 @@ code on the left and watch it run at native speed on a 320×240 screen on the ri
 <td><img src="docs/img/raymarch.png" width="320" alt="Ray marcher"><br><sub><b>raymarch</b>: signed distance fields, soft shadows</sub></td>
 </tr>
 <tr>
-<td><img src="docs/img/mandelbrot.png" width="320" alt="Mandelbrot zoom"><br><sub><b>mandelbrot</b>: endless smooth-colored zoom</sub></td>
+<td><img src="docs/img/mandelbrot.png" width="320" alt="Mandelbrot zoom"><br><sub><b>mandelbrot</b>: endless deep zoom, two pixels at a time in double precision</sub></td>
 <td><img src="docs/img/julia.png" width="320" alt="Julia set"><br><sub><b>julia</b>: morphing Julia sets, four pixels at a time with SIMD</sub></td>
 </tr>
 <tr>
@@ -293,8 +293,9 @@ compiles to the complex multiplication pasted in place, then the component-wise 
 )
 ```
 
-The Mandelbrot example is written this way. It renders exactly the same pixels as the scalar version it replaced and
-runs within about 8% of its speed. Inlining also makes the ray marcher 19% faster. `compile(src, { inline: false })`
+Written this way with plain `float`s, the Mandelbrot example rendered exactly the same pixels as the hand-written
+scalar loop it replaced, within about 8% of its speed. (It now uses SIMD; see below.) Inlining also makes the ray
+marcher 19% faster. `compile(src, { inline: false })`
 turns it off; the tests check that every example prints, draws and plays exactly the same either way.
 
 ### SIMD vectors
@@ -310,20 +311,22 @@ if any(m) { print(r.y); }            // lanes are .x .y .z .w
 - **`f32x4`** holds four 32-bit floats and supports `+ - * / %` and comparisons. **`i32x4`** holds four ints and supports
   `+ - *`, comparisons, `& | ^ ~` and shifts by an int. It has no `/`, because WebAssembly SIMD has no integer
   division, and the checker says so.
-- **Comparisons give a `boolx4` mask.** Combine masks with `& | ^ !`, test them with `any(m)`/`all(m)`, choose lane by
-  lane with `select(m, a, b)`, and count with `m as i32x4`, which gives 1 or 0 per lane. Using a mask as an `if`
-  condition is an error that points to `any`/`all`.
-- **Lanes** are `.x .y .z .w`, for reading and writing, wherever the vector lives. An `f32x4` lane reads as an ordinary
-  (64-bit) `float`.
-- **A scalar next to a vector** fills all four lanes. Int literals adapt to `f32x4` like they do to `float`, and
-  everything else needs an explicit `as`.
-- **Lane-wise builtins:** `sqrt floor ceil trunc round abs min max clamp`. `as` converts between `f32x4`, `i32x4` and
-  `boolx4`.
+- **`f64x2`** holds two 64-bit floats, with the same operations as `f32x4` but full double precision.
+- **Comparisons give a mask:** `boolx4` for four-lane vectors, `boolx2` for `f64x2`. Combine masks with `& | ^ !`, test
+  them with `any(m)`/`all(m)`, choose lane by lane with `select(m, a, b)`, and count with `m as i32x4` (or
+  `m as f64x2`), which gives 1 or 0 per lane. Using a mask as an `if` condition is an error that points to
+  `any`/`all`.
+- **Lanes** are `.x .y .z .w` (`.x .y` for two-lane types), for reading and writing, wherever the vector lives. An
+  `f32x4` lane reads as an ordinary (64-bit) `float`.
+- **A scalar next to a vector** fills every lane. Int literals adapt to `f32x4` and `f64x2` like they do to `float`,
+  and everything else needs an explicit `as`.
+- **Lane-wise builtins:** `sqrt floor ceil trunc round abs min max clamp`. `as` converts between vector types with the
+  same number of lanes: `f32x4`, `i32x4` and `boolx4`, or `f64x2` and `boolx2`.
 - **Bit-casts:** `to_bits(v)` reads an `f32x4`'s IEEE 754 bit patterns as an `i32x4`, and `from_bits(i)` turns them
   back. A `v128` is just 128 bits, so both compile to no instructions at all.
 - **Vectors are values:** locals, parameters, return values, struct fields, globals, array elements and constants (folded
-  at compile time, with f32 rounding). A struct whose fields are all `f32x4` gets component-wise math and
-  operators, like any other struct.
+  at compile time, with f32 rounding for `f32x4`). A struct whose fields are all `f32x4` (or all `f64x2`) gets
+  component-wise math and operators, like any other struct.
 
 Each vector is a single wasm `v128` value, so `a * b + c` on four pixels compiles to two instructions. The
 [`julia`](examples/julia.kiln) example shades four pixels per loop iteration. Its `C4` struct holds four complex
@@ -378,8 +381,20 @@ pixel), it renders the same image (no pixel differs by more than 8/255) and runs
 alone is 1.7–2× faster. It doesn't reach 4×, because every iteration also pays for the mask, and a group of four
 keeps going until its slowest pixel escapes.
 
+**Two lanes in double precision.** The [`mandelbrot`](examples/mandelbrot.kiln) example zooms up to 640,000× into the set.
+By the end, neighboring pixels are about 2e-8 apart, less than an f32 can resolve near the zoom's center (its
+spacing there is 6e-8). So the example uses `f64x2`: a `C2` struct with the same `*` operator and the same masked
+loop, two pixels at a time. The cost of the masks shows more with two lanes than with four. Measured across the zoom
+against the scalar `float` version:
+
+| version | speed | pixels |
+|---|---|---|
+| scalar `float`, one pixel at a time | 1× | the reference |
+| `f64x2`, two at a time (the example) | **1.17×** (1.10–1.24×) | identical, in every frame |
+| `f32x4`, four at a time | 1.70× | from 25 s of zoom on, 19–44% are off by more than 24/255 |
+
 There is no scalar `f32` type: on current CPUs, scalar f32 and f64 add and multiply run at the same speed, so the gain
-comes from the four lanes. There's no `f64x2` either, and lanes are always named, never indexed with a variable.
+comes from the lanes. Lanes are always named, never indexed with a variable.
 
 ### Sound
 
@@ -491,7 +506,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 136 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 137 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -502,9 +517,9 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 ## Limits and ideas
 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD
-covers `f32x4`/`i32x4` only. Natural next steps would be `f64x2` lanes (two-wide SIMD for deep zooms, where f32 runs out
-of precision), a pass that reuses locals, and source maps from wasm offsets back to lines.
+modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD has
+no 64-bit integer lanes, so `f64x2` has no bit-casts. Natural next steps would be a pass that reuses locals, and
+source maps from wasm offsets back to lines.
 
 ## License
 

@@ -11,7 +11,8 @@ const has = (list, re) => assert.ok(list.some((m) => re.test(m)), `expected an e
 // ---------------------------------------------------------------------------
 // Every vector operation, checked three ways: computed at run time by the
 // SIMD instructions, folded at compile time by the checker, and computed here
-// by an independent reference that rounds to f32 after every step.
+// by an independent reference (rounding to f32 after every step for f32x4,
+// plain doubles for f64x2).
 
 const NAN = '0.0 / 0.0';
 const INF = '1.0 / 0.0';
@@ -24,6 +25,12 @@ const INPUTS = {
   ib: ['i32x4', [2, 5, 1, -1], ['2', '5', '1', '-1']],
   ma: ['boolx4', [true, false, true, false], ['true', 'false', 'true', 'false']],
   mb: ['boolx4', [true, true, false, false], ['true', 'true', 'false', 'false']],
+  e: ['f64x2', [0.1, -3.75], ['0.1', '-3.75']],
+  f: ['f64x2', [1e300, 0.3], ['1e300', '0.3']],
+  g: ['f64x2', [NaN, -0], [NAN, '-0.0']],
+  h: ['f64x2', [2.5, -0.5], ['2.5', '-0.5']],
+  na: ['boolx2', [true, false], ['true', 'false']],
+  nb: ['boolx2', [true, true], ['true', 'true']],
 };
 const V = Object.fromEntries(Object.entries(INPUTS).map(([k, [type, lanes]]) => [k, { type, lanes: lanes.map((x) => (type === 'f32x4' ? f32(x) : x)) }]));
 
@@ -45,10 +52,14 @@ const view = new DataView(new ArrayBuffer(4));
 const bitsOf = (x) => (view.setFloat32(0, x), view.getInt32(0));
 const floatOf = (n) => (view.setInt32(0, n), view.getFloat32(0));
 const map = (fn, ...vs) => [0, 1, 2, 3].map((i) => fn(...vs.map((v) => (Array.isArray(v) ? v[i] : v))));
+const map2 = (fn, ...vs) => [0, 1].map((i) => fn(...vs.map((v) => (Array.isArray(v) ? v[i] : v))));
+const DOPS = { '+': (x, y) => x + y, '-': (x, y) => x - y, '*': (x, y) => x * y, '/': (x, y) => x / y, '%': (x, y) => x - Math.trunc(x / y) * y };
 const L = (k) => V[k].lanes;
 const fv = (lanes) => `f32x4(${lanes.map(formatF32).join(', ')})`;
 const iv = (lanes) => `i32x4(${lanes.join(', ')})`;
 const bv = (lanes) => `boolx4(${lanes.join(', ')})`;
+const dv = (lanes) => `f64x2(${lanes.map(formatFloat).join(', ')})`;
+const b2 = (lanes) => `boolx2(${lanes.join(', ')})`;
 
 // [expression with {x} placeholders, expected output]
 const CASES = [
@@ -117,6 +128,49 @@ const CASES = [
   ['from_bits({ia})', fv(map(floatOf, L('ia')))], // includes a NaN pattern and -0.0
   ['from_bits({ib} << 23)', fv(map((x) => floatOf(x << 23), L('ib')))],
   ['to_bits(from_bits({ib}))', iv(L('ib'))],
+  // f64x2: two doubles, no rounding to f32
+  ...['+', '-', '*', '/', '%'].flatMap((op) => [
+    [`{e} ${op} {f}`, dv(map2(DOPS[op], L('e'), L('f')))],
+    [`{g} ${op} {e}`, dv(map2(DOPS[op], L('g'), L('e')))],
+    [`{f} ${op} 2.5`, dv(map2(DOPS[op], L('f'), 2.5))],
+    [`-1 ${op} {e}`, dv(map2(DOPS[op], -1, L('e')))],
+  ]),
+  ...['==', '!=', '<', '<=', '>', '>='].flatMap((op) => [
+    [`{e} ${op} {f}`, b2(map2(CMP[op], L('e'), L('f')))],
+    [`{g} ${op} {g}`, b2(map2(CMP[op], L('g'), L('g')))],
+    [`{h} ${op} 0.0`, b2(map2(CMP[op], L('h'), 0))],
+  ]),
+  ['-{e}', dv(map2((x) => -x, L('e')))],
+  ...['sqrt', 'floor', 'ceil', 'trunc', 'round', 'abs'].flatMap((fn) => {
+    const ref = { sqrt: Math.sqrt, floor: Math.floor, ceil: Math.ceil, trunc: Math.trunc, round: nearest, abs: Math.abs }[fn];
+    return ['e', 'f', 'g', 'h'].map((k) => [`${fn}({${k}})`, dv(map2(ref, L(k)))]);
+  }),
+  ['min({e}, {f})', dv(map2(Math.min, L('e'), L('f')))],
+  ['max({e}, {g})', dv(map2(Math.max, L('e'), L('g')))],
+  ['min({f}, 1)', dv(map2(Math.min, L('f'), 1))],
+  ['clamp({e}, -1.0, 1.0)', dv(map2((x) => Math.min(Math.max(x, -1), 1), L('e')))],
+  ['clamp({f}, {e}, f64x2(0.2))', dv(map2((x, lo) => Math.min(Math.max(x, lo), 0.2), L('f'), L('e')))],
+  ['{na} as f64x2', dv(map2((x) => +x, L('na')))],
+  ['{g} as boolx2', b2(map2((x) => x !== 0, L('g')))],
+  ['{e} as boolx2', b2(map2((x) => x !== 0, L('e')))],
+  ...['&', '|', '^'].map((op) => [`{na} ${op} {nb}`, b2(map2((x, y) => (op === '&' ? x && y : op === '|' ? x || y : x !== y), L('na'), L('nb')))]),
+  ['!{na}', b2(map2((x) => !x, L('na')))],
+  ['{na} == {nb}', b2(map2(CMP['=='], L('na'), L('nb')))],
+  ['{na} != {nb}', b2(map2(CMP['!='], L('na'), L('nb')))],
+  ['{nb} & false', b2([false, false])],
+  ['any({na})', 'true'],
+  ['all({na})', 'false'],
+  ['all({nb})', 'true'],
+  ['any({na} & !{na})', 'false'],
+  ['select({na}, {e}, {f})', dv(map2((m, x, y) => (m ? x : y), L('na'), L('e'), L('f')))],
+  ['select({e} < {f}, 1, -1)', dv(map2((x, y) => (x < y ? 1 : -1), L('e'), L('f')))],
+  ['select({na}, {nb}, false)', b2(map2((m, x) => m && x, L('na'), L('nb')))],
+  ['{e}.x', formatFloat(L('e')[0])],
+  ['{f}.y', formatFloat(L('f')[1])],
+  ['{na}.y', 'false'],
+  ['({e} * {f}).x', formatFloat(L('e')[0] * L('f')[0])],
+  ['f64x2(0.1, 1e-310)', dv([0.1, 1e-310])],
+  ['f64x2(7)', dv([7, 7])],
   ['i32x4(9)', iv([9, 9, 9, 9])],
 ];
 
@@ -138,9 +192,9 @@ test('every vector operation matches an f32 reference, at run time and when fold
 });
 
 test('the run-time program really uses SIMD instructions, and the folded one computes nothing', () => {
-  const ops = /\b(f32x4|i32x4)\.(add|sub|mul|div|eq|ne|lt|le|gt|ge|min|max|abs|neg|sqrt|floor|ceil|trunc|nearest|shl|shr_s|shr_u|convert_i32x4_s|trunc_sat_f32x4_s)\b|v128\.(and|or|xor|not|bitselect|any_true)|i32x4\.all_true/;
+  const ops = /\b(f32x4|i32x4|f64x2|i64x2)\.(add|sub|mul|div|eq|ne|lt|le|gt|ge|min|max|abs|neg|sqrt|floor|ceil|trunc|nearest|shl|shr_s|shr_u|convert_i32x4_s|trunc_sat_f32x4_s|all_true)\b|v128\.(and|or|xor|not|bitselect|any_true)/;
   const lines = (src) => compile(src).wat.split('\n').filter((l) => ops.test(l)).length;
-  assert.ok(lines(program(false)) > 100);
+  assert.ok(lines(program(false)) > 150);
   assert.equal(lines(program(true)), 0);
 });
 
@@ -242,6 +296,34 @@ test('top-level constants, globals and arrays of vectors are initialized at comp
   const wat = compile(src).wat;
   assert.match(wat, /\(global \$mask \(mut v128\) \(v128\.const i32x4 0 0 -1 -1\)\)/);
   assert.match(wat, /\(global \$box\.lo \(mut v128\) \(v128\.const f32x4 -1 -1 -1 -1\)\)/);
+});
+
+test('f64x2 structs, lanes and masks work like their four-lane cousins, in double precision', async () => {
+  const src = `
+    struct C2 { re: f64x2, im: f64x2 }
+    impl C2 {
+      fn *(self, o: C2) -> C2 { return C2(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re); }
+      fn abs2(self) -> f64x2 { return self.re * self.re + self.im * self.im; }
+    }
+    var cs: [C2; 2];
+    var tiny = f64x2(1e-9, 1e-12);
+    fn main() {
+      let z = C2(f64x2(1.0, 0.5), f64x2(2.0, -1.0));
+      cs[1] = z * z + z;
+      cs[1].im.y = 3.0;
+      print(cs[1], cs[1].abs2(), z == z, -z);
+      // 1 + 1e-9 survives in f64; in f32 it would round to 1
+      let w = f64x2(1.0) + tiny;
+      print(w.x - 1.0 > 0.0, (f32x4(1.0) + 0.000000001).x - 1.0 > 0.0);
+      var count = f64x2(0.0);
+      for i in 0..5 { count += (f64x2(1.0, 3.0) > i as float) as f64x2; }
+      print(count);
+    }`;
+  assert.deepEqual(await run(src), [
+    'C2(f64x2(-2.0, -0.25), f64x2(6.0, 3.0)) f64x2(40.0, 9.0625) true C2(f64x2(-1.0, -0.5), f64x2(-2.0, 1.0))',
+    'true false',
+    'f64x2(1.0, 3.0)',
+  ]);
 });
 
 test('a mask counts iterations per lane: the 4-wide escape-time loop', async () => {
@@ -348,12 +430,20 @@ test('vector errors explain what SIMD can and cannot do', () => {
   has(e('let v = f32x4(1.0); let w = v < 2.0 ? v : v;'), /condition must be a bool, found boolx4.*select\(mask, a, b\)/);
   has(e('let m = f32x4(1.0) < 2.0; let k = m && m;'), /use '&' to combine masks lane by lane/);
   has(e('let v = i32x4(1); print(v << i32x4(2));'), /shifted by the same amount/);
-  has(e('let v = f32x4(1.0); print(v & v);'), /'&' works on i32x4 and boolx4/);
+  has(e('let v = f32x4(1.0); print(v & v);'), /'&' works on i32x4 and on masks/);
   has(e('let v = f32x4(1.0); print(v as float);'), /can't convert f32x4 to float.*read one lane with v\.x/);
   has(e('let x = 1.0; print(x as f32x4);'), /can't convert float to f32x4.*f32x4\(x\)/);
-  has(e('let v = f32x4(1.0); print(select(true, v, v));'), /needs a boolx4 mask/);
+  has(e('let v = f32x4(1.0); print(select(true, v, v));'), /needs a mask to choose lane by lane/);
   has(e('print(any(true));'), /no version of 'any' takes \(bool\)/);
   has(e('print(to_bits(1.0));'), /no version of 'to_bits' takes \(float\).*to_bits\(f32x4\) -> i32x4/);
+  has(e('let v = f64x2(1.0, 2.0, 3.0);'), /'f64x2' takes 1 value \(for all two lanes\) or 2 values \(one per lane\), but 3 were given/);
+  has(e('let v = f64x2(1.0); print(v.z);'), /f64x2 has no lane 'z'.*its lanes are x and y/);
+  has(e('let v = f64x2(1.0); print(v as f32x4);'), /can't convert f64x2 to f32x4.*f64x2 has 2 lanes and f32x4 has 4/);
+  has(e('let v = f64x2(1.0); let w = f32x4(1.0); print(v + w);'), /same kind of vector/);
+  has(e('let v = f64x2(1.0); print(select(f32x4(1.0) > 0.0, v, v));'), /a boolx4 mask chooses between values with 4 lanes, not f64x2/);
+  has(e('let v = f64x2(1.0); print(v & v);'), /'&' works on i32x4 and on masks/);
+  has(e('let v = f64x2(1.0); if v > 0.0 { }'), /if condition must be a bool, found boolx2.*any\(mask\) or all\(mask\)/);
+  has(e('let v = f64x2(1.0); print(select(v > 0.0, true, 2));'), /must be the same vector type.*boolx2 mask chooses between f64x2 values or floats/);
   has(e('let v = f32x4(1.0); v.x = 2.0;'), /can't modify 'v.x' because 'v' is immutable/);
   has(e('', 'export fn f(v: f32x4) -> float { return v.x; }'), /exported function 'f' can't take or return SIMD vectors/);
   has(e('', 'struct f32x4 { a: int }'), /'f32x4' is a built-in type/);

@@ -6,7 +6,7 @@ export const F64 = 0x7c;
 export const V128 = 0x7b;
 export const VOID_BLOCK = 0x40;
 
-const VECTOR_TYPES = new Set(['f32x4', 'i32x4', 'boolx4', 'v128']);
+const VECTOR_TYPES = new Set(['f32x4', 'i32x4', 'boolx4', 'f64x2', 'boolx2', 'v128']);
 export const valType = (t) => (t === 'float' ? F64 : VECTOR_TYPES.has(t) ? V128 : I32);
 export const valTypeName = (vt) => (vt === F64 ? 'f64' : vt === V128 ? 'v128' : 'i32');
 
@@ -57,12 +57,18 @@ export class ByteWriter {
     for (let i = 0; i < 8; i++) this.bytes.push(f64Scratch.getUint8(i));
     return this;
   }
-  /** A v128 constant: four f32 lanes (`float`) or four i32 lanes. */
-  v128(lanes, float) {
+  /** A v128 constant from its lanes; `kind` is 'f32', 'i32', 'f64' or 'i64' (i64 lanes are -1 or 0). */
+  v128(lanes, kind) {
     for (const x of lanes) {
-      if (float) f64Scratch.setFloat32(0, x, true);
-      else f64Scratch.setInt32(0, x, true);
-      for (let i = 0; i < 4; i++) this.bytes.push(f64Scratch.getUint8(i));
+      if (kind === 'f32') f64Scratch.setFloat32(0, x, true);
+      else if (kind === 'i32') f64Scratch.setInt32(0, x, true);
+      else if (kind === 'f64') f64Scratch.setFloat64(0, x, true);
+      else {
+        f64Scratch.setInt32(0, x, true);
+        f64Scratch.setInt32(4, x < 0 ? -1 : 0, true);
+      }
+      const size = kind === 'f64' || kind === 'i64' ? 8 : 4;
+      for (let i = 0; i < size; i++) this.bytes.push(f64Scratch.getUint8(i));
     }
     return this;
   }
@@ -160,13 +166,16 @@ export const OPS = {
   'f64.min': [0xa4],
   'f64.max': [0xa5],
   'f64.convert_i32_s': [0xb7],
+  'i32.wrap_i64': [0xa7],
+  'i64.extend_i32_s': [0xac],
   'f32.demote_f64': [0xb6],
   'f64.promote_f32': [0xbb],
   'i32.trunc_sat_f64_s': [0xfc, 0x02],
 };
 
 // SIMD (fixed-width 128-bit vectors): prefix 0xfd, then the opcode as a u32
-// LEB128, then any immediates. Only the f32x4/i32x4 subset Kiln uses.
+// LEB128, then any immediates. Only the f32x4/i32x4/f64x2/i64x2 subset Kiln
+// uses.
 const simd = (op, imm) => {
   const bytes = [0xfd];
   let n = op;
@@ -232,6 +241,35 @@ Object.assign(OPS, {
   'f32x4.max': simd(0xe9),
   'i32x4.trunc_sat_f32x4_s': simd(0xf8),
   'f32x4.convert_i32x4_s': simd(0xfa),
+  // f64x2, and the i64x2 instructions that boolx2 masks need
+  'i64x2.splat': simd(0x12),
+  'f64x2.splat': simd(0x14),
+  'i64x2.extract_lane': simd(0x1d, 'lane'),
+  'i64x2.replace_lane': simd(0x1e, 'lane'),
+  'f64x2.extract_lane': simd(0x21, 'lane'),
+  'f64x2.replace_lane': simd(0x22, 'lane'),
+  'f64x2.eq': simd(0x47),
+  'f64x2.ne': simd(0x48),
+  'f64x2.lt': simd(0x49),
+  'f64x2.gt': simd(0x4a),
+  'f64x2.le': simd(0x4b),
+  'f64x2.ge': simd(0x4c),
+  'f64x2.ceil': simd(0x74),
+  'f64x2.floor': simd(0x75),
+  'f64x2.trunc': simd(0x7a),
+  'f64x2.nearest': simd(0x94),
+  'i64x2.all_true': simd(0xc3),
+  'i64x2.eq': simd(0xd6),
+  'i64x2.ne': simd(0xd7),
+  'f64x2.abs': simd(0xec),
+  'f64x2.neg': simd(0xed),
+  'f64x2.sqrt': simd(0xef),
+  'f64x2.add': simd(0xf0),
+  'f64x2.sub': simd(0xf1),
+  'f64x2.mul': simd(0xf2),
+  'f64x2.div': simd(0xf3),
+  'f64x2.min': simd(0xf4),
+  'f64x2.max': simd(0xf5),
 });
 
 /** WAT spelling of an f64 constant. */
