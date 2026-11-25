@@ -832,7 +832,9 @@ class FnGen {
         this.release(off);
         this.load(arr.elem, arr.addr);
         this.expr(s.value);
-        this.binop(s.op, type, s);
+        // A user operator can take a scalar and a struct and return a scalar.
+        if (s.opMethod) this.emit('call', s.opMethod.sym);
+        else this.binop(s.op, type, s);
       } else {
         this.expr(s.value);
       }

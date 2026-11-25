@@ -34,6 +34,30 @@ test('unary minus and compound assignment use the operators too', async () => {
   assert.equal(await out('var z = Complex(1.0, 1.0); print(-z); z *= z; print(z); z *= 0.5; print(z);', COMPLEX), 'Complex(-1.0, -1.0)\nComplex(0.0, 2.0)\nComplex(0.0, 1.0)');
 });
 
+// Regression from review on PR #4: an operator that takes a scalar and a
+// struct and returns the scalar must also apply to scalar array elements.
+test('compound assignment to a scalar uses scalar-returning operators, wherever the scalar lives', async () => {
+  const src = `
+    struct V { x: int }
+    struct W { a: int, b: int }
+    impl V { fn +(a: int, b: V) -> int { return a + b.x * 10; } }
+    impl W { fn *(k: float, w: W) -> float { return k * (w.a + w.b) as float; } }
+    var data: [int; 2];
+    var fs: [float; 2];
+    var g = 2;
+    fn main() {
+      data[0] = 2;
+      data[0] += V(3);       // array element
+      var l = 2;
+      l += V(3);             // local
+      g += V(3);             // global
+      fs[1] = 1.5;
+      fs[1] *= W(1, 3);      // two-field operand into a float array element
+      print(data[0], l, g, fs[1]);
+    }`;
+  assert.deepEqual(await run(src), ['32 32 32 6.0']);
+});
+
 test('the Mandelbrot step reads like the math: z = z * z + c', async () => {
   const src = `${COMPLEX}
     fn escapes(c: Complex) -> int {
