@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compile } from '../src/compiler.js';
 import { formatF32, formatFloat } from '../src/runtime.js';
+import { readFileSync } from 'node:fs';
 import { run, out, errors } from './helpers.js';
 
 const f32 = Math.fround;
@@ -40,6 +41,9 @@ const CMP = { '==': (x, y) => x === y, '!=': (x, y) => x !== y, '<': (x, y) => x
 const nearest = (x) => (Math.abs(x % 1) === 0.5 ? 2 * Math.round(x / 2) : Math.round(x));
 const satTrunc = (x) => (Number.isNaN(x) ? 0 : x >= 2147483647 ? 2147483647 : x <= -2147483648 ? -2147483648 : Math.trunc(x) | 0);
 
+const view = new DataView(new ArrayBuffer(4));
+const bitsOf = (x) => (view.setFloat32(0, x), view.getInt32(0));
+const floatOf = (n) => (view.setInt32(0, n), view.getFloat32(0));
 const map = (fn, ...vs) => [0, 1, 2, 3].map((i) => fn(...vs.map((v) => (Array.isArray(v) ? v[i] : v))));
 const L = (k) => V[k].lanes;
 const fv = (lanes) => `f32x4(${lanes.map(formatF32).join(', ')})`;
@@ -108,6 +112,11 @@ const CASES = [
   ['{mb}.z', 'false'],
   ['({a} + {b}).z', formatFloat(FOPS['+'](L('a')[2], L('b')[2]))],
   ['f32x4(0.1, 1, -2.5, 1e-40)', fv([0.1, 1, -2.5, 1e-40].map(f32))],
+  ['to_bits({a})', iv(map(bitsOf, L('a')))],
+  ['to_bits({d})', iv(map(bitsOf, L('d')))],
+  ['from_bits({ia})', fv(map(floatOf, L('ia')))], // includes a NaN pattern and -0.0
+  ['from_bits({ib} << 23)', fv(map((x) => floatOf(x << 23), L('ib')))],
+  ['to_bits(from_bits({ib}))', iv(L('ib'))],
   ['i32x4(9)', iv([9, 9, 9, 9])],
 ];
 
@@ -287,6 +296,43 @@ test('vector code is identical with and without inlining', async () => {
   assert.deepEqual(await go(true), await go(false));
 });
 
+test('to_bits and from_bits reinterpret the same 128 bits, so they compile to nothing', () => {
+  const src = `
+    fn f(v: f32x4) -> i32x4 { return to_bits(v); }
+    fn g(v: i32x4) -> f32x4 { return from_bits(v); }
+    fn main() { print(f(f32x4(1.0)), g(i32x4(0))); }`;
+  const r = compile(src, { inline: false });
+  for (const [fn, name, V] of [['f', 'to_bits', 'i32x4'], ['g', 'from_bits', 'f32x4']]) {
+    const start = r.wat.indexOf(`(func $${fn} `);
+    const body = r.wat.slice(start, r.wat.indexOf('\n  )', start));
+    const lines = body.split('\n').slice(1).map((l) => l.trim()).filter((l) => !l.startsWith(';; 2:') && !l.startsWith(';; 3:'));
+    assert.deepEqual(lines, ['local.get $v', `;; ${name}: the same 128 bits, now read as ${V}`, 'return']);
+  }
+});
+
+test("the julia example's bit-cast log2 is accurate to about 2e-5", async () => {
+  // log2v reads the exponent out of the float's bits and uses a short series for the rest.
+  const ex = readFileSync(new URL('../examples/julia.kiln', import.meta.url), 'utf8');
+  const start = ex.indexOf('fn log2v');
+  const log2v = ex.slice(start, ex.indexOf('\n}\n', start) + 3);
+  const src = `${log2v}
+    fn main() {
+      var worst = 0.0;
+      var x = 0.000001;
+      while x < 1000000000000.0 {
+        let v = f32x4(x, x * 1.17, x * 1.41, x * 1.73);
+        let got = log2v(v);
+        worst = max(worst, abs(got.x - log(v.x) / log(2.0)));
+        worst = max(worst, abs(got.y - log(v.y) / log(2.0)));
+        worst = max(worst, abs(got.z - log(v.z) / log(2.0)));
+        worst = max(worst, abs(got.w - log(v.w) / log(2.0)));
+        x *= 1.093;
+      }
+      print(worst < 0.00003, worst > 0.0);
+    }`;
+  assert.deepEqual(await run(src), ['true true']);
+});
+
 // ---------------------------------------------------------------------------
 // Errors
 
@@ -307,6 +353,7 @@ test('vector errors explain what SIMD can and cannot do', () => {
   has(e('let x = 1.0; print(x as f32x4);'), /can't convert float to f32x4.*f32x4\(x\)/);
   has(e('let v = f32x4(1.0); print(select(true, v, v));'), /needs a boolx4 mask/);
   has(e('print(any(true));'), /no version of 'any' takes \(bool\)/);
+  has(e('print(to_bits(1.0));'), /no version of 'to_bits' takes \(float\).*to_bits\(f32x4\) -> i32x4/);
   has(e('let v = f32x4(1.0); v.x = 2.0;'), /can't modify 'v.x' because 'v' is immutable/);
   has(e('', 'export fn f(v: f32x4) -> float { return v.x; }'), /exported function 'f' can't take or return SIMD vectors/);
   has(e('', 'struct f32x4 { a: int }'), /'f32x4' is a built-in type/);

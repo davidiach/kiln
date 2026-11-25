@@ -26,6 +26,9 @@ export const INTRINSICS = {
   clamp: [[[F, F, F], F], [[I, I, I], I], [[F4, F4, F4], F4], [[F4, F, F], F4], [[I4, I4, I4], I4], [[I4, I, I], I4]],
   any: [[[B4], B]],
   all: [[[B4], B]],
+  // Reinterpret the same 128 bits: an f32x4's IEEE 754 bit patterns as ints, and back.
+  to_bits: [[[F4], I4]],
+  from_bits: [[[I4], F4]],
 };
 
 // Host imports. Names starting with "__" are internal and can't be called directly.

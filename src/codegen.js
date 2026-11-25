@@ -1527,6 +1527,12 @@ class FnGen {
       this.emit(name === 'any' ? 'v128.any_true' : 'i32x4.all_true');
       return;
     }
+    if (name === 'to_bits' || name === 'from_bits') {
+      // A v128 is just 128 bits: reading them as the other lane type is free.
+      this.expr(e.args[0]);
+      this.comment(`${name}: the same 128 bits, now read as ${V}`);
+      return;
+    }
     const isInt = V === 'i32x4';
     const arg = (i) => {
       if (!isVector(params[i])) this.pushSplat(e.args[i], V);
