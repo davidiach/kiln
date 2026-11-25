@@ -2,7 +2,7 @@
 
 **A tiny statically typed language that compiles straight to WebAssembly, with a live-coding pixel playground.**
 
-Kiln's compiler is about 3,300 lines of dependency-free JavaScript. It lexes, parses, type-checks and
+Kiln's compiler is about 4,500 lines of dependency-free JavaScript. It lexes, parses, type-checks and
 then writes the WebAssembly binary *byte by byte*: no LLVM, no Binaryen, no `wat2wasm`. It is fast
 enough to recompile on every keystroke, so the playground feels like a fantasy console: type
 code on the left and watch it run at native speed on a 320×240 screen on the right, with sound.
@@ -16,19 +16,23 @@ code on the left and watch it run at native speed on a 320×240 screen on the ri
 </tr>
 <tr>
 <td><img src="docs/img/mandelbrot.png" width="320" alt="Mandelbrot zoom"><br><sub><b>mandelbrot</b>: endless smooth-colored zoom</sub></td>
+<td><img src="docs/img/julia.png" width="320" alt="Julia set"><br><sub><b>julia</b>: morphing Julia sets, four pixels at a time with SIMD</sub></td>
+</tr>
+<tr>
 <td><img src="docs/img/fire.png" width="320" alt="Fire"><br><sub><b>fire</b>: the word KILN, burning</sub></td>
-</tr>
-<tr>
 <td><img src="docs/img/plasma.png" width="320" alt="Plasma"><br><sub><b>plasma</b>: the demoscene classic</sub></td>
+</tr>
+<tr>
 <td><img src="docs/img/particles.png" width="320" alt="Particle fountain"><br><sub><b>particles</b>: 4,000 particles with additive light</sub></td>
-</tr>
-<tr>
 <td><img src="docs/img/life.png" width="320" alt="Game of Life"><br><sub><b>life</b>: Conway's Life with glowing trails; draw with the mouse</sub></td>
-<td><img src="docs/img/dodge.png" width="320" alt="Stardust"><br><sub><b>dodge</b>: a small arcade game with sound effects</sub></td>
 </tr>
 <tr>
+<td><img src="docs/img/dodge.png" width="320" alt="Stardust"><br><sub><b>dodge</b>: a small arcade game with sound effects</sub></td>
 <td><img src="docs/img/sequencer.png" width="320" alt="Step sequencer"><br><sub><b>sequencer</b>: click to compose; a 16-step drum and melody loop</sub></td>
+</tr>
+<tr>
 <td><img src="docs/img/hello.png" width="320" alt="Hello, Kiln"><br><sub><b>hello</b>: a guided first program</sub></td>
+<td></td>
 </tr>
 </table>
 
@@ -293,6 +297,70 @@ The Mandelbrot example is written this way. It renders exactly the same pixels a
 runs within about 8% of its speed. Inlining also makes the ray marcher 19% faster. `compile(src, { inline: false })`
 turns it off; the tests check that every example prints, draws and plays exactly the same either way.
 
+### SIMD vectors
+
+```rust
+let v = f32x4(1.0, 2.0, 3.0, 4.0);   // four 32-bit floats in one 128-bit value
+let w = v * 2.0 + v;                 // lane by lane; a scalar fills all four lanes
+let m = w > 5.0;                     // a boolx4 mask: one bool per lane
+let r = select(m, w, 0.0);           // f32x4(0.0, 6.0, 9.0, 12.0)
+if any(m) { print(r.y); }            // lanes are .x .y .z .w
+```
+
+- **`f32x4`** holds four 32-bit floats and supports `+ - * / %` and comparisons. **`i32x4`** holds four ints and supports
+  `+ - *`, comparisons, `& | ^ ~` and shifts by an int. It has no `/`, because WebAssembly SIMD has no integer
+  division, and the checker says so.
+- **Comparisons give a `boolx4` mask.** Combine masks with `& | ^ !`, test them with `any(m)`/`all(m)`, choose lane by
+  lane with `select(m, a, b)`, and count with `m as i32x4`, which gives 1 or 0 per lane. Using a mask as an `if`
+  condition is an error that points to `any`/`all`.
+- **Lanes** are `.x .y .z .w`, for reading and writing, wherever the vector lives. An `f32x4` lane reads as an ordinary
+  (64-bit) `float`.
+- **A scalar next to a vector** fills all four lanes. Int literals adapt to `f32x4` like they do to `float`, and
+  everything else needs an explicit `as`.
+- **Lane-wise builtins:** `sqrt floor ceil trunc round abs min max clamp`. `as` converts between `f32x4`, `i32x4` and
+  `boolx4`.
+- **Vectors are values:** locals, parameters, return values, struct fields, globals, array elements and constants (folded
+  at compile time, with f32 rounding). A struct whose fields are all `f32x4` gets component-wise math and
+  operators, like any other struct.
+
+Each vector is a single wasm `v128` value, so `a * b + c` on four pixels compiles to two instructions. The
+[`julia`](examples/julia.kiln) example shades four pixels per loop iteration. Its `C4` struct holds four complex
+numbers, so the inner loop still reads like the math:
+
+```rust
+for i in 0..MAX_ITER {
+  let inside = z.abs2() < 256.0;      // which lanes haven't escaped
+  if !any(inside) { break; }
+  n += inside as i32x4;               // count only those
+  let next = z * z + c;
+  z = C4(select(inside, next.re, z.re), select(inside, next.im, z.im));
+}
+```
+
+```wasm
+;; inlined C4.abs2
+local.get $z.re
+local.get $z.re
+f32x4.mul
+local.get $z.im
+local.get $z.im
+f32x4.mul
+f32x4.add
+v128.const f32x4 256 256 256 256
+f32x4.lt
+local.tee $inside
+v128.any_true
+```
+
+Compared with the same program written with `float`s one pixel at a time, it renders the same image (no pixel differs
+by more than 8/255) and runs a whole frame **about 1.5× faster** (1.4–1.7× across the animation, in Node 22).
+The iteration loop alone is 1.7–2× faster. It doesn't reach 4×, because every iteration also pays for the mask,
+and a group of four keeps going until its slowest pixel escapes. The rest of the frame is coloring, which is
+still one pixel at a time (two `log` calls and a palette lookup each).
+
+There is no scalar `f32` type: on current CPUs, scalar f32 and f64 add and multiply run at the same speed, so the gain
+comes from the four lanes. There's no `f64x2` either, and lanes are always named, never indexed with a variable.
+
 ### Sound
 
 ```rust
@@ -403,7 +471,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 123 tests: language semantics, structs, methods, operators, inlining, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 134 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -414,9 +482,10 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 ## Limits and ideas
 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies. Natural
-next steps would be `f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back
-to lines.
+modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD
+covers `f32x4`/`i32x4` only. Natural next steps would be a bit-cast between `f32x4` and `i32x4` (for fast
+approximate `log`/`exp` in SIMD, which would let coloring go four-wide too), a pass that reuses locals, and source
+maps from wasm offsets back to lines.
 
 ## License
 

@@ -8,17 +8,24 @@ const F = 'float';
 const I = 'int';
 const B = 'bool';
 const S = 'str';
+const F4 = 'f32x4';
+const I4 = 'i32x4';
+const B4 = 'boolx4';
 
+// Each entry lists overloads: [[param types], result]. The vector versions
+// work lane by lane; a scalar argument next to vectors fills all four lanes.
 export const INTRINSICS = {
-  sqrt: [[[F], F]],
-  floor: [[[F], F]],
-  ceil: [[[F], F]],
-  trunc: [[[F], F]],
-  round: [[[F], F]],
-  abs: [[[F], F], [[I], I]],
-  min: [[[F, F], F], [[I, I], I]],
-  max: [[[F, F], F], [[I, I], I]],
-  clamp: [[[F, F, F], F], [[I, I, I], I]],
+  sqrt: [[[F], F], [[F4], F4]],
+  floor: [[[F], F], [[F4], F4]],
+  ceil: [[[F], F], [[F4], F4]],
+  trunc: [[[F], F], [[F4], F4]],
+  round: [[[F], F], [[F4], F4]],
+  abs: [[[F], F], [[I], I], [[F4], F4], [[I4], I4]],
+  min: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4]],
+  max: [[[F, F], F], [[I, I], I], [[F4, F4], F4], [[F4, F], F4], [[I4, I4], I4], [[I4, I], I4]],
+  clamp: [[[F, F, F], F], [[I, I, I], I], [[F4, F4, F4], F4], [[F4, F, F], F4], [[I4, I4, I4], I4], [[I4, I, I], I4]],
+  any: [[[B4], B]],
+  all: [[[B4], B]],
 };
 
 // Host imports. Names starting with "__" are internal and can't be called directly.
@@ -41,6 +48,7 @@ export const IMPORTS = {
   now: { params: [], ret: F },
   __print_i: { params: [I], ret: 'void' },
   __print_f: { params: [F], ret: 'void' },
+  __print_f32: { params: [F], ret: 'void' },
   __print_b: { params: [B], ret: 'void' },
   __print_s: { params: [S], ret: 'void' },
   __print_end: { params: [], ret: 'void' },
