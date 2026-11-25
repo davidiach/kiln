@@ -32,6 +32,20 @@ function mayMutate(e) {
 }
 const align = (n, a) => Math.ceil(n / a) * a;
 
+const CHILDREN = ['left', 'right', 'operand', 'expr', 'cond', 'then', 'else', 'target', 'index', 'receiver', 'init', 'value', 'start', 'end', 'body', 'args'];
+
+/** The local variables a statement or expression mentions (reads or writes), anywhere inside it. */
+function localsIn(node, out = new Set()) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const n of node) localsIn(n, out);
+    return out;
+  }
+  if (node.kind === 'Ident' && node.sym?.kind === 'local') out.add(node.sym);
+  for (const k of CHILDREN) localsIn(node[k], out);
+  return out;
+}
+
 /** What kind of wasm local holds a leaf: 'float' (f64), 'v128' or 'int' (i32). */
 const localKind = (t) => (t === 'float' ? 'float' : isVector(t) || t === 'v128' ? 'v128' : 'int');
 const TEMP_POOL = { float: 'f64', v128: 'v128', int: 'i32' };
@@ -429,8 +443,19 @@ class FnGen {
     this.depth = 0;
     this.labels = [];
     this.loops = [];
-    this.localTypes = sym.locals.map((l) => localKind(l.type));
-    this.localNames = uniqueNames(sym.locals.map((l) => l.name));
+    // Wasm locals. Parameters come first, in the checker's order. Every other
+    // local is handed out by temp() from a free list per wasm type: a
+    // variable gets its slots at its `let` and gives them back after the last
+    // statement that mentions it (see statements()), so variables whose
+    // lifetimes don't overlap, and temporaries, share slots. slotNames records
+    // every variable a slot has held.
+    const np = sym.paramLeafCount;
+    this.localTypes = sym.locals.slice(0, np).map((l) => localKind(l.type));
+    this.slotNames = sym.locals.slice(0, np).map((l) => [l.name]);
+    this.localNames = null; // final names, once the body is generated
+    this.slots = new Map(); // local variable symbol -> its wasm locals
+    for (const p of sym.paramSyms) this.slots.set(p, leafTypes(p.type).map((_, i) => p.index + i));
+    this.declared = []; // variables in scope, innermost last
     this.free = { i32: [], f64: [], v128: [] };
     this.src = gen.sources[sym.origin] ?? [];
     this.lastLine = -1;
@@ -444,7 +469,7 @@ class FnGen {
 
   generate() {
     const body = this.sym.decl.body.body;
-    for (const s of body) this.stmt(s);
+    this.statements(body);
     const last = body[body.length - 1];
     if (this.sym.selfMode === 'var' && this.sym.ret === 'void') {
       this.pushSelf(); // falling off the end returns the updated receiver
@@ -453,6 +478,18 @@ class FnGen {
       // validator wants the fallthrough to be provably dead.
       this.emit('unreachable');
     }
+    this.nameLocals();
+  }
+
+  /**
+   * Name each wasm local after the variables it held: `x`, or `x|y` when y
+   * reused x's slot once x was done; `t.N` for one only temporaries used.
+   * The listing was written with placeholders; fill them in.
+   */
+  nameLocals() {
+    const names = this.slotNames.map((ns, i) => (ns.length ? [...new Set(ns)].join('|') : `t.${i}`));
+    this.localNames = uniqueNames(names);
+    this.lines = this.lines.map((l) => l.replace(/\u0001(\d+)\u0001/g, (_, i) => this.localNames[i]));
   }
 
   /** A `var self` method hands its (possibly changed) self back to the caller. */
@@ -521,7 +558,7 @@ class FnGen {
           break;
         case 'local':
           this.code.u32(args[0]);
-          text += ` $${this.localNames[args[0]]}`;
+          text += ` $\u0001${args[0]}\u0001`; // named in nameLocals()
           break;
         case 'global':
           this.code.u32(args[0].index);
@@ -600,8 +637,26 @@ class FnGen {
     if (pool.length) return pool.pop();
     const idx = this.localTypes.length;
     this.localTypes.push(kind);
-    this.localNames.push(`t.${idx}`);
+    this.slotNames.push([]);
     return idx;
+  }
+
+  /** Give a variable its wasm locals (one per leaf), reusing free ones. */
+  declare(sym) {
+    const names = isStruct(sym.type) ? sym.type.leafPaths.map((p) => `${sym.name}.${p}`) : [sym.name];
+    const idx = leafTypes(sym.type).map((t, i) => {
+      const slot = this.temp(t);
+      this.slotNames[slot].push(names[i]);
+      return slot;
+    });
+    this.slots.set(sym, idx);
+    this.declared.push(sym);
+    return idx;
+  }
+
+  /** End a scope: variables declared since `mark` give their locals back. */
+  endScope(mark) {
+    while (this.declared.length > mark) this.release(...this.slots.get(this.declared.pop()));
   }
   release(...idxs) {
     for (const idx of idxs) this.free[TEMP_POOL[this.localTypes[idx]]].push(idx);
@@ -616,9 +671,9 @@ class FnGen {
 
   /** The wasm locals holding a local variable's leaves (remapped inside an inlined call). */
   localIndices(sym) {
-    const mapped = this.inlineMap?.get(sym);
-    if (mapped) return mapped;
-    return leafTypes(sym.type).map((_, i) => sym.index + i);
+    const idx = this.inlineMap?.get(sym) ?? this.slots.get(sym);
+    if (!idx) throw new Error(`codegen: no wasm local for '${sym.name}'`);
+    return idx;
   }
 
   /**
@@ -852,7 +907,33 @@ class FnGen {
   // ----------------------------------------------------------- statements
 
   block(b) {
-    for (const s of b.body) this.stmt(s);
+    this.statements(b.body);
+  }
+
+  /**
+   * Generate a block's statements. A variable declared here gives its locals
+   * back right after the last statement that mentions it, not only when the
+   * block ends. That is safe with loops: a variable used inside a loop is
+   * mentioned by the loop statement as a whole, and one declared inside a
+   * loop body is declared again on every iteration.
+   */
+  statements(list) {
+    const mark = this.declared.length;
+    const lastUse = new Map();
+    list.forEach((s, j) => {
+      for (const sym of localsIn(s)) lastUse.set(sym, j);
+    });
+    list.forEach((s, j) => {
+      this.stmt(s);
+      for (let k = this.declared.length - 1; k >= mark; k--) {
+        const sym = this.declared[k];
+        if ((lastUse.get(sym) ?? -1) <= j) {
+          this.release(...this.slots.get(sym));
+          this.declared.splice(k, 1);
+        }
+      }
+    });
+    this.endScope(mark);
   }
 
   stmt(s) {
@@ -862,7 +943,9 @@ class FnGen {
         const type = s.sym.type;
         if (s.init) this.expr(s.init);
         else leafTypes(type).forEach((t) => this.zero(t));
-        for (let i = leafTypes(type).length - 1; i >= 0; i--) this.emit('local.set', s.sym.index + i);
+        // Declared after the initializer, so it can reuse that expression's temporaries.
+        const idx = this.declare(s.sym);
+        for (let i = idx.length - 1; i >= 0; i--) this.emit('local.set', idx[i]);
         return;
       }
       case 'Assign':
@@ -904,13 +987,16 @@ class FnGen {
         return;
       }
       case 'For': {
-        const i = s.sym.index;
+        const mark = this.declared.length;
         const endConst = s.end.constValue;
         this.expr(s.start);
+        const [i] = this.declare(s.sym);
         this.emit('local.set', i);
+        let end;
         if (endConst === undefined) {
           this.expr(s.end);
-          this.emit('local.set', s.endLocal.index);
+          [end] = this.declare(s.endLocal); // a constant end needs no local
+          this.emit('local.set', end);
         }
         const brk = {};
         const top = {};
@@ -918,7 +1004,7 @@ class FnGen {
         this.open('block', VOID_BLOCK, brk);
         this.open('loop', VOID_BLOCK, top);
         this.emit('local.get', i);
-        if (endConst === undefined) this.emit('local.get', s.endLocal.index);
+        if (endConst === undefined) this.emit('local.get', end);
         else this.emit('i32.const', endConst);
         this.emit(s.inclusive ? 'i32.gt_s' : 'i32.ge_s');
         this.brIf(brk, 'exit loop');
@@ -934,6 +1020,7 @@ class FnGen {
         this.br(top, 'repeat');
         this.close();
         this.close();
+        this.endScope(mark);
         return;
       }
       case 'Break':
