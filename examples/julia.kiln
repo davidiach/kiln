@@ -1,7 +1,8 @@
 // A Julia set, four pixels at a time.
 // An f32x4 holds four 32-bit floats in one WebAssembly SIMD register, so
 // every + and * below works on four pixels at once. A boolx4 mask keeps
-// track of which of the four are still iterating.
+// track of which of the four are still iterating, and even the coloring's
+// logarithms are computed four at a time.
 
 struct C4 { re: f32x4, im: f32x4 }   // four complex numbers
 
@@ -29,14 +30,32 @@ fn main() {
   }
 }
 
-fn shade(x: int, y: int, n: int, z2: float, t: float) {
-  if n == MAX_ITER {
-    pixel(x, y, 0x000000);
-    return;
-  }
-  // fractional iteration count -> no visible bands
-  let smooth = n as float + 1.0 - log(0.5 * log(z2)) / log(2.0);
-  pixel(x, y, colors[((smooth * 12.0 + t * 20.0) as int) & 255]);
+// log2 of four positive floats at once, without leaving SIMD.
+// An f32 is stored as 2^e * m with m in [1, 2), and to_bits() lets us read
+// e straight out of bits 23..30. For m, log2(m) = 2/ln(2) * atanh(s) with
+// s = (m - 1) / (m + 1), and atanh(s) = s + s^3/3 + s^5/5 + s^7/7 + ...
+// converges fast because s < 1/3.
+fn log2v(x: f32x4) -> f32x4 {
+  let bits = to_bits(x);
+  let e = ((bits >> 23) & 255) - 127;
+  let m = from_bits((bits & 0x7fffff) | 0x3f800000);   // same mantissa, exponent 0
+  let s = (m - 1.0) / (m + 1.0);
+  let s2 = s * s;
+  return e as f32x4 + s * (2.8853901 + s2 * (0.9617967 + s2 * (0.5770780 + s2 * 0.4121986)));
+}
+
+// Color four pixels: black inside the set, a palette color outside.
+fn shade4(x: int, y: int, n: i32x4, z2: f32x4, t: float) {
+  // fractional iteration count -> no visible bands:
+  // n + 1 - log2(ln|z|), where ln|z| = ln(2)/2 * log2(|z|^2)
+  let smooth = n as f32x4 + 1.0 - log2v(0.34657359 * log2v(z2));
+  let k = ((smooth * 12.0 + t * 20.0) as i32x4) & 255;
+  let rgb = i32x4(colors[k.x], colors[k.y], colors[k.z], colors[k.w]);
+  let c = select(n == MAX_ITER, 0x000000, rgb);
+  pixel(x, y, c.x);
+  pixel(x + 1, y, c.y);
+  pixel(x + 2, y, c.z);
+  pixel(x + 3, y, c.w);
 }
 
 fn frame(t: float) {
@@ -60,11 +79,7 @@ fn frame(t: float) {
         let next = z * z + c;
         z = C4(select(inside, next.re, z.re), select(inside, next.im, z.im));
       }
-      let z2 = z.abs2();
-      shade(px, py, n.x, z2.x, t);
-      shade(px + 1, py, n.y, z2.y, t);
-      shade(px + 2, py, n.z, z2.z, t);
-      shade(px + 3, py, n.w, z2.w, t);
+      shade4(px, py, n, z.abs2(), t);
     }
   }
 }
