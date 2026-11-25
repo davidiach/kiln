@@ -774,7 +774,8 @@ class FnGen {
     if (compound) {
       this.loadPlace(p);
       this.expr(s.value);
-      this.binopStack(s.op, type, s.value.type, s);
+      if (s.opMethod) this.emit('call', s.opMethod.sym);
+      else this.binopStack(s.op, type, s.value.type, s);
     } else {
       this.expr(s.value);
     }
@@ -846,6 +847,11 @@ class FnGen {
         return;
       }
       case 'Unary':
+        if (e.opMethod) {
+          this.expr(e.operand);
+          this.emit('call', e.opMethod.sym);
+          return;
+        }
         if (isStruct(e.type)) {
           const v = this.materialize(e.operand);
           for (const [i, t] of e.type.leafTypes.entries()) this.negate(t, () => this.emit('local.get', v.locals[i]));
@@ -862,6 +868,7 @@ class FnGen {
         }
         return;
       case 'Binary':
+        if (e.opMethod) return this.userOperator(e);
         if (e.op === '&&') {
           this.expr(e.left);
           this.open('if', I32);
@@ -940,6 +947,24 @@ class FnGen {
         return;
     }
     throw new Error(`codegen: unknown expression ${e.kind}`);
+  }
+
+  /** A call to an operator defined in an impl, possibly derived (swapped and/or negated). */
+  userOperator(e) {
+    const { sym, swap, negate } = e.opMethod;
+    if (!swap) {
+      this.expr(e.left);
+      this.expr(e.right);
+    } else {
+      // Evaluate left to right, then pass the operands the other way round.
+      const A = this.materialize(e.left);
+      const B = this.materialize(e.right);
+      for (const l of B.locals) this.emit('local.get', l);
+      for (const l of A.locals) this.emit('local.get', l);
+      this.release(...A.temps, ...B.temps);
+    }
+    this.emit('call', sym);
+    if (negate) this.emit('i32.eqz');
   }
 
   negate(type, push) {

@@ -134,7 +134,7 @@ test('struct errors', () => {
   has(errors(`${V2} ${V3} fn main() { let a = Vec2(1.0, 2.0) + Vec3(1.0, 2.0, 3.0); }`), /can't apply '\+' to Vec2 and Vec3/);
   has(errors('struct M { a: int, b: float } fn main() { let m = M(1, 2.0) * 2; }'), /all floats or all ints/);
   has(errors(`${V2} fn main() { let a = 2; let v = Vec2(1.0, 2.0) * a; }`), /a Vec2 can be combined with a float, not an int/);
-  has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); let b = v < v; }`), /doesn't work on structs/);
+  has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); let b = v < v; }`), /can't apply '<' to Vec2 and Vec2.*fn <\(self, o: Vec2\) -> bool/);
   has(errors(`${V2} fn main() { let v = select(true, Vec2(1.0, 2.0), Vec2(0.0, 0.0)); }`), /cond \? a : b/);
   has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0) as int; }`), /can't convert Vec2 to int/);
   has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); var x = 1.0; x += v; }`), /would change the type/);
