@@ -1572,9 +1572,25 @@ export function evalVector(op, V, l, r) {
   });
 }
 
+const bitsView = new DataView(new ArrayBuffer(4));
+
+/** Fold a lane-wise intrinsic. Returns undefined to leave it to run time. */
 function foldVectorIntrinsic(name, overload, args) {
   if (name === 'any') return args[0].some(Boolean);
   if (name === 'all') return args[0].every(Boolean);
+  if (name === 'to_bits' || name === 'from_bits') {
+    const out = args[0].map((x) => {
+      if (name === 'to_bits') {
+        bitsView.setFloat32(0, x);
+        return bitsView.getInt32(0);
+      }
+      bitsView.setInt32(0, x);
+      return bitsView.getFloat32(0);
+    });
+    // WebAssembly doesn't fix the sign and payload of a NaN (and JavaScript
+    // numbers don't keep them), so lanes that are NaN are left to run time.
+    return (name === 'to_bits' ? args[0] : out).some(Number.isNaN) ? undefined : out;
+  }
   const V = overload[1];
   const isInt = V === 'i32x4';
   const lanes = args.map((a) => (Array.isArray(a) ? a : [0, 1, 2, 3].map(() => laneValue(V, a))));

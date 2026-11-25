@@ -319,6 +319,8 @@ if any(m) { print(r.y); }            // lanes are .x .y .z .w
   everything else needs an explicit `as`.
 - **Lane-wise builtins:** `sqrt floor ceil trunc round abs min max clamp`. `as` converts between `f32x4`, `i32x4` and
   `boolx4`.
+- **Bit-casts:** `to_bits(v)` reads an `f32x4`'s IEEE 754 bit patterns as an `i32x4`, and `from_bits(i)` turns them
+  back. A `v128` is just 128 bits, so both compile to no instructions at all.
 - **Vectors are values:** locals, parameters, return values, struct fields, globals, array elements and constants (folded
   at compile time, with f32 rounding). A struct whose fields are all `f32x4` gets component-wise math and
   operators, like any other struct.
@@ -352,11 +354,29 @@ local.tee $inside
 v128.any_true
 ```
 
-Compared with the same program written with `float`s one pixel at a time, it renders the same image (no pixel differs
-by more than 8/255) and runs a whole frame **about 1.5× faster** (1.4–1.7× across the animation, in Node 22).
-The iteration loop alone is 1.7–2× faster. It doesn't reach 4×, because every iteration also pays for the mask,
-and a group of four keeps going until its slowest pixel escapes. The rest of the frame is coloring, which is
-still one pixel at a time (two `log` calls and a palette lookup each).
+The coloring is four-wide too. Smooth coloring needs `log2(ln|z|)` for every pixel, and WebAssembly SIMD has no
+logarithm, so the example builds one from the float format. `to_bits` reads the exponent straight out of bits 23–30,
+and a short series handles the mantissa:
+
+```rust
+fn log2v(x: f32x4) -> f32x4 {
+  let bits = to_bits(x);
+  let e = ((bits >> 23) & 255) - 127;
+  let m = from_bits((bits & 0x7fffff) | 0x3f800000);   // same mantissa, exponent 0
+  let s = (m - 1.0) / (m + 1.0);                       // log2(m) = 2/ln(2) * atanh(s)
+  let s2 = s * s;
+  return e as f32x4 + s * (2.8853901 + s2 * (0.9617967 + s2 * (0.5770780 + s2 * 0.4121986)));
+}
+```
+
+Its error is under 2e-5, far finer than one palette step; a test keeps it under 3e-5. Only the palette lookups
+and the pixel writes are still one lane at a time.
+
+Compared with the same program written with `float`s one pixel at a time (which calls JavaScript's `log` twice per
+pixel), it renders the same image (no pixel differs by more than 8/255) and runs a whole frame **about 2.3× faster**
+(2.15–2.5× across the animation, in Node 22). Before the coloring went four-wide, it was 1.5×. The iteration loop
+alone is 1.7–2× faster. It doesn't reach 4×, because every iteration also pays for the mask, and a group of four
+keeps going until its slowest pixel escapes.
 
 There is no scalar `f32` type: on current CPUs, scalar f32 and f64 add and multiply run at the same speed, so the gain
 comes from the four lanes. There's no `f64x2` either, and lanes are always named, never indexed with a variable.
@@ -471,7 +491,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 134 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 136 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -483,9 +503,8 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
 modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD
-covers `f32x4`/`i32x4` only. Natural next steps would be a bit-cast between `f32x4` and `i32x4` (for fast
-approximate `log`/`exp` in SIMD, which would let coloring go four-wide too), a pass that reuses locals, and source
-maps from wasm offsets back to lines.
+covers `f32x4`/`i32x4` only. Natural next steps would be `f64x2` lanes (two-wide SIMD for deep zooms, where f32 runs out
+of precision), a pass that reuses locals, and source maps from wasm offsets back to lines.
 
 ## License
 
