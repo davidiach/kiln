@@ -17,6 +17,7 @@ const EXAMPLES = [
   ['landscape', 'Voxel landscape'],
   ['raymarch', 'Ray marcher'],
   ['mandelbrot', 'Mandelbrot zoom'],
+  ['julia', 'Julia set, 4 pixels at a time (SIMD)'],
   ['fire', 'Fire'],
   ['life', 'Game of Life'],
   ['particles', 'Particle fountain'],

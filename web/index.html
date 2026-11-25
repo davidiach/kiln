@@ -106,8 +106,18 @@ balls[0].vel.y -= 1.0;</pre>
 }
 z = z * z + c;   // + falls back to component-wise</pre>
         <p>Define <code>+ - * / % == != &lt; &lt;= &gt; &gt;=</code> in an <code>impl</code>, and unary <code>-</code> with just <code>self</code>. Overloads are picked by operand type, and the struct can be on either side. <code>!=</code> comes from <code>==</code>, and <code>&gt; &lt;= &gt;=</code> from <code>&lt;</code>. Anything you don't define keeps the built-in behavior, and compound assignment like <code>z *= w</code> uses your operator. Small operators and methods are inlined, so they cost about the same as writing the math out.</p>
+        <h3>SIMD vectors</h3>
+        <pre>let v = f32x4(1.0, 2.0, 3.0, 4.0);  // four 32-bit floats in one register
+let k = i32x4(7);                     // 7 in all four lanes
+let w = v * 2.0 + v;                  // lane by lane; a scalar fills all lanes
+v.x                                   // read a lane (x y z w) as a float
+let m = v &gt; 2.5;                      // boolx4: one bool per lane
+if any(m) { }                         // any(m), all(m)
+let r = select(m, v, 0.0);            // pick per lane
+n += m as i32x4;                      // true -&gt; 1, false -&gt; 0</pre>
+        <p><code>f32x4</code> supports <code>+ - * / %</code> and comparisons. <code>i32x4</code> supports <code>+ - *</code>, comparisons, <code>&amp; | ^ ~</code> and shifts by an int, but not <code>/</code>, because WebAssembly SIMD can't divide integers. <code>boolx4</code> masks combine with <code>&amp; | ^ !</code>. <code>sqrt floor ceil trunc round abs min max clamp</code> work lane by lane, and <code>as</code> converts between the three types. Vectors can be locals, parameters, return values, struct fields, globals and array elements. Use them to shade four pixels per loop iteration.</p>
         <h3>Sound</h3>
-        <pre>beep(440.0, 0.2);                       // frequency in Hz, seconds
+        <pre>beep(440.0, 0.2);                     // frequency in Hz, seconds
 sound(WAVE_SQUARE, 880.0, 1760.0, 0.1, 0.4);  // wave, from Hz, to Hz, seconds, volume
 sound(WAVE_NOISE, 3000.0, 60.0, 0.6, 0.9);    // noise: an explosion
 sound_at(t + 0.5, WAVE_TRIANGLE, note(60), note(60), 0.3, 0.5);</pre>

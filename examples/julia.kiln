@@ -1,0 +1,70 @@
+// A Julia set, four pixels at a time.
+// An f32x4 holds four 32-bit floats in one WebAssembly SIMD register, so
+// every + and * below works on four pixels at once. A boolx4 mask keeps
+// track of which of the four are still iterating.
+
+struct C4 { re: f32x4, im: f32x4 }   // four complex numbers
+
+impl C4 {
+  // (a + bi)(c + di) = (ac - bd) + (ad + bc)i, in all four lanes
+  fn *(self, o: C4) -> C4 {
+    return C4(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re);
+  }
+  fn abs2(self) -> f32x4 {
+    return self.re * self.re + self.im * self.im;
+  }
+}
+
+let MAX_ITER = 128;
+let LANES = f32x4(0.0, 1.0, 2.0, 3.0);   // x offsets of the four pixels
+
+var colors: [int; 256];   // the palette, computed once
+
+fn main() {
+  for i in 0..len(colors) {
+    let t = i as float / len(colors) as float;
+    colors[i] = rgbf(0.5 + 0.5 * cos(TAU * (t + 0.0)),
+                     0.5 + 0.5 * cos(TAU * (t + 0.1)),
+                     0.5 + 0.5 * cos(TAU * (t + 0.2)));
+  }
+}
+
+fn shade(x: int, y: int, n: int, z2: float, t: float) {
+  if n == MAX_ITER {
+    pixel(x, y, 0x000000);
+    return;
+  }
+  // fractional iteration count -> no visible bands
+  let smooth = n as float + 1.0 - log(0.5 * log(z2)) / log(2.0);
+  pixel(x, y, colors[((smooth * 12.0 + t * 20.0) as int) & 255]);
+}
+
+fn frame(t: float) {
+  // c circles just outside the edge of the Mandelbrot set's main
+  // cardioid, where the Julia sets are full of spirals
+  let a = t * 0.15;
+  let cr = 1.02 * (0.5 * cos(a) - 0.25 * cos(2.0 * a));
+  let ci = 1.02 * (0.5 * sin(a) - 0.25 * sin(2.0 * a));
+  let c = C4(f32x4(cr), f32x4(ci));
+  let scale = 3.0 / HEIGHT as float;
+  for py in 0..HEIGHT {
+    let im = f32x4((py - HEIGHT / 2) as float * scale);
+    for qx in 0..WIDTH / 4 {
+      let px = qx * 4;
+      var z = C4((LANES + (px - WIDTH / 2) as float) * scale, im);
+      var n = i32x4(0);
+      for i in 0..MAX_ITER {
+        let inside = z.abs2() < 256.0;      // which lanes haven't escaped
+        if !any(inside) { break; }
+        n += inside as i32x4;               // count only those
+        let next = z * z + c;
+        z = C4(select(inside, next.re, z.re), select(inside, next.im, z.im));
+      }
+      let z2 = z.abs2();
+      shade(px, py, n.x, z2.x, t);
+      shade(px + 1, py, n.y, z2.y, t);
+      shade(px + 2, py, n.z, z2.z, t);
+      shade(px + 3, py, n.w, z2.w, t);
+    }
+  }
+}
