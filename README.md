@@ -176,6 +176,46 @@ compiles to two additions, with no memory traffic and no temporaries:
 Arrays of structs are laid out in linear memory with natural alignment, and `balls[i].vel.y` compiles to one bounds
 check plus a single `f64.load` at a constant offset.
 
+### Methods
+
+```rust
+impl Vec2 {
+  fn zero() -> Vec2 { return Vec2(0.0, 0.0); }        // static: Vec2.zero()
+  fn dot(self, o: Vec2) -> float { return self.x * o.x + self.y * o.y; }
+  fn length(self) -> float { return sqrt(self.dot(self)); }
+  fn normalize(self) -> Vec2 { return self / self.length(); }
+}
+
+impl Ball {
+  fn update(var self, dt: float) {                    // changes the ball it's called on
+    self.vel += GRAVITY * dt;
+    self.pos += self.vel * dt;
+  }
+}
+
+balls[i].update(dt);
+let speed = balls[i].vel.length();
+```
+
+- Methods live in `impl` blocks and are namespaced per struct, so a `Vec2` and a `Vec3` can each have `length()`.
+- `self` is a copy, so calling `v.length()` can never change `v`. Writing to a plain `self` is a compile error that
+  suggests `var self`.
+- A **`var self`** method changes the value it's called on. It works on variables, array elements and fields of
+  either; calling one on a temporary or an immutable value is an error. A method without `self` is called on the type:
+  `Vec2.zero()`.
+
+A method is an ordinary function named `Type.method` with `self`'s fields as its first parameters. A `var self` method is
+*copy-in/copy-out*: it returns the updated receiver as extra results (wasm multi-value again), and the caller stores them
+back where the receiver came from:
+
+```wasm
+(func $Ball.update (param $self.pos.x f64) (param $self.pos.y f64) (param $self.vel.x f64) (param $self.vel.y f64)
+                   (param $self.color i32) (param $dt f64) (result f64 f64 f64 f64 i32)
+```
+
+The ray marcher's vector math and the particle fountain's update loop use methods; both render byte-for-byte the same
+images as before, at the same speed.
+
 ### Sound
 
 ```rust
@@ -285,7 +325,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 79 tests: language semantics, structs, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 93 tests: language semantics, structs, methods, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -295,8 +335,9 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 
 ## Limits and ideas
 
-Kiln is deliberately small. There are no closures, methods, generics, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. Natural next steps would be methods on structs,
+Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
+modules; arrays are global and can't be passed around. Natural next steps would be operator methods (`+` on your own
+types beyond component-wise math),
 `f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back to lines.
 
 ## License
