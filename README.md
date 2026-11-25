@@ -470,6 +470,12 @@ A few details I enjoyed:
   globals, or a base address plus a constant offset) and loads or stores only the leaves it needs.
 - **Arrays use the memarg offset.** `grid[i]` compiles to `i32.load offset=<grid's address>` with the scaled index on the
   stack, after a single unsigned compare for the bounds check (which also catches negative indices).
+- **Variables share wasm locals.** A variable gets its locals when its `let` runs and gives them back after the last
+  statement in its block that mentions it, so later variables and temporaries reuse them. That's safe with loops: a
+  variable used inside a loop is mentioned by the loop as a whole. A slot that held several variables is named after
+  all of them, like `(local $c|row i32)`. Across the examples this cuts locals by 30% (729 to 509) and module size by
+  3%; the largest function in `dodge` went from 39 locals to 17. Speed is unchanged, since engines allocate registers
+  themselves.
 - **Traps know where they came from.** Bounds and division checks call an imported `__trap(site, value)`; the site
   indexes a table the compiler emits, so the runtime can say *which* array, *what* index and *which line*.
 - **The playground can't be frozen.** Programs run in a Web Worker built from a blob. The main thread only requests the
@@ -506,7 +512,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 137 tests: language semantics, structs, methods, operators, inlining, SIMD, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 144 tests: language semantics, structs, methods, operators, inlining, SIMD, locals, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -518,8 +524,8 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
 modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD has
-no 64-bit integer lanes, so `f64x2` has no bit-casts. Natural next steps would be a pass that reuses locals, and
-source maps from wasm offsets back to lines.
+no 64-bit integer lanes, so `f64x2` has no bit-casts. Locals are reused at statement granularity, not per
+instruction. A natural next step would be source maps from wasm offsets back to lines.
 
 ## License
 

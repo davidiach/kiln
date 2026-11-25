@@ -61,7 +61,7 @@ export function highlightKiln(src, marks = []) {
   return html;
 }
 
-const WAT_TOKEN = /(\$[\w.]+)|("(?:[^"\\]|\\.)*")|\b((?:i32|i64|f64|f32|v128|f32x4|i32x4|f64x2|i64x2)\.[a-z_0-9]+|local\.\w+|global\.\w+|call|block|loop|if|else|end|br_if|br|return|drop|select|unreachable)\b|\b(module|func|param|result|local|import|export|memory|global|mut|data|type|offset)\b|(-?\b\d[\w.+-]*|\bnan\b|\binf\b)/g;
+const WAT_TOKEN = /(\$[\w.|]+)|("(?:[^"\\]|\\.)*")|\b((?:i32|i64|f64|f32|v128|f32x4|i32x4|f64x2|i64x2)\.[a-z_0-9]+|local\.\w+|global\.\w+|call|block|loop|if|else|end|br_if|br|return|drop|select|unreachable)\b|\b(module|func|param|result|local|import|export|memory|global|mut|data|type|offset)\b|(-?\b\d[\w.+-]*|\bnan\b|\binf\b)/g;
 
 /** Highlight a WAT listing line by line. */
 export function highlightWat(wat) {
