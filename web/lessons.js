@@ -281,6 +281,7 @@ fn frame(t: float) {
     id: 'structs',
     title: 'Structs',
     body: `<p>A <code>struct</code> bundles values into a new type of your own. <code>Vec2(160.0, 40.0)</code> makes one, <code>pos.x</code> reads a field, and when every field is a float, <code>+</code>, <code>-</code> and <code>*</code> work on all of them at once.</p>
+<p>Structs can have methods too: <code>impl Vec2 { fn length(self) -&gt; float { ... } }</code> lets you write <code>v.length()</code>. The Reference tab has more.</p>
 <p>This ball has gravity, and it bounces off the floor…</p>`,
     task: `…but it escapes through the right side. Make it bounce off the left and right walls too, by flipping <code>vel.x</code>. Then watch it for a few seconds.`,
     code: `struct Vec2 { x: float, y: float }

@@ -15,7 +15,28 @@ import { IMPORTS } from './builtins.js';
 import { isStruct, leafTypes, numericKind, sizeOf } from './types.js';
 
 const textEncoder = new TextEncoder();
+
+/**
+ * Can evaluating this expression change a caller's variable? Only a
+ * `var self` method call can (it stores its receiver back).
+ */
+function mayMutate(e) {
+  if (!e || typeof e !== 'object') return false;
+  if (e.mayMutate !== undefined) return e.mayMutate;
+  let m = e.kind === 'MethodCall' && e.method?.selfMode === 'var';
+  for (const k of ['left', 'right', 'operand', 'expr', 'cond', 'then', 'else', 'target', 'index', 'receiver']) m ||= mayMutate(e[k]);
+  if (e.args) for (const a of e.args) m ||= mayMutate(a);
+  e.mayMutate = m;
+  return m;
+}
 const align = (n, a) => Math.ceil(n / a) * a;
+
+/**
+ * What a function leaves on the stack when it returns: its return value's
+ * leaves and, for a `var self` method, the updated receiver's leaves, which
+ * the caller stores back where the receiver came from.
+ */
+const resultsOf = (f) => [...leafTypes(f.ret), ...(f.selfMode === 'var' ? leafTypes(f.owner) : [])];
 
 export function generate(checker, sources) {
   return new Generator(checker, sources).run();
@@ -121,7 +142,7 @@ class Generator {
 
     // ---- assemble the binary
     this.imports.forEach((im) => (im.type = this.typeIndex(im.params, im.ret === 'void' ? [] : [im.ret])));
-    this.funcs.forEach((f) => (f.typeIdx = this.typeIndex(f.params.flatMap((p) => leafTypes(p.type)), leafTypes(f.ret))));
+    this.funcs.forEach((f) => (f.typeIdx = this.typeIndex(f.params.flatMap((p) => leafTypes(p.type)), resultsOf(f))));
 
     const sections = [];
     const mod = new ByteWriter();
@@ -300,7 +321,7 @@ class Generator {
       const np = f.paramLeafCount;
       const params = fg.localTypes.slice(0, np).map((t, i) => ` (param $${fg.localNames[i]} ${vt(t)})`).join('');
       out.push('');
-      out.push(`  (func $${f.name}${exText}${params}${results(leafTypes(f.ret))}`);
+      out.push(`  (func $${f.name}${exText}${params}${results(resultsOf(f))}`);
       const locals = fg.localTypes.slice(np);
       if (locals.length) {
         const decl = locals.map((t, i) => `(local $${fg.localNames[np + i]} ${vt(t)})`);
@@ -343,11 +364,19 @@ class FnGen {
     const body = this.sym.decl.body.body;
     for (const s of body) this.stmt(s);
     const last = body[body.length - 1];
-    if (this.sym.ret !== 'void' && !(last && last.kind === 'Return')) {
+    if (this.sym.selfMode === 'var' && this.sym.ret === 'void') {
+      this.pushSelf(); // falling off the end returns the updated receiver
+    } else if (this.sym.ret !== 'void' && !(last && last.kind === 'Return')) {
       // Every path returned already (the checker verified it), but wasm's
       // validator wants the fallthrough to be provably dead.
       this.emit('unreachable');
     }
+  }
+
+  /** A `var self` method hands its (possibly changed) self back to the caller. */
+  pushSelf() {
+    const n = leafTypes(this.sym.owner).length;
+    for (let i = 0; i < n; i++) this.emit('local.get', i); // self is always the first parameter
   }
 
   localGroups() {
@@ -487,9 +516,13 @@ class FnGen {
     return { locals: temps, temps };
   }
 
-  /** Make the leaves of `e` available in locals; struct locals are used in place. */
-  materialize(e) {
-    if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local') {
+  /**
+   * Make the leaves of `e` available in locals. A local variable is used in
+   * place, unless one of the `later` expressions (evaluated after `e`) could
+   * change it, in which case its current value is copied first.
+   */
+  materialize(e, later = []) {
+    if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local' && !later.some(mayMutate)) {
       return { locals: leafTypes(e.type).map((_, i) => e.sym.index + i), temps: [] };
     }
     this.expr(e);
@@ -696,6 +729,7 @@ class FnGen {
         return;
       case 'Return':
         if (s.value) this.expr(s.value);
+        if (this.sym.selfMode === 'var') this.pushSelf();
         this.emit('return');
         return;
       case 'ExprStmt':
@@ -847,7 +881,7 @@ class FnGen {
           return;
         }
         if (isStruct(e.left.type) || isStruct(e.right.type)) {
-          const A = this.materialize(e.left);
+          const A = this.materialize(e.left, [e.right]);
           const B = this.materialize(e.right);
           if (e.op === '==' || e.op === '!=') this.structEquals(e.op, e.left.type, A, B);
           else this.componentwise(e.op, e.left.type, e.right.type, A, B, e);
@@ -872,6 +906,8 @@ class FnGen {
         return;
       case 'Call':
         return this.call(e);
+      case 'MethodCall':
+        return this.methodCall(e);
       case 'Index':
         if (e.indexKind === 'array') {
           if (isStruct(e.type)) {
@@ -1033,7 +1069,7 @@ class FnGen {
       case 'print': {
         // Evaluate every argument before printing anything: an argument may
         // call a function that prints, and the host builds one line at a time.
-        const vals = e.args.map((a) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a)));
+        const vals = e.args.map((a, i) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a, e.args.slice(i + 1))));
         e.args.forEach((a, i) => {
           if (i) this.printText(' ');
           if (vals[i]) this.printLeaves(a.type, vals[i].locals);
@@ -1064,6 +1100,30 @@ class FnGen {
         return this.intrinsic(e);
     }
     throw new Error(`codegen: unknown call ${e.callee}`);
+  }
+
+  methodCall(e) {
+    const m = e.method;
+    if (e.isStatic) {
+      for (const a of e.args) this.expr(a);
+      this.emit('call', m);
+      return;
+    }
+    if (m.selfMode !== 'var') {
+      this.expr(e.receiver);
+      for (const a of e.args) this.expr(a);
+      this.emit('call', m);
+      return;
+    }
+    // var self: copy the receiver in, call, and store the updated copy back.
+    // The method returns [result..., self...]; storing pops self and leaves
+    // the result on the stack.
+    const p = this.place(e.receiver);
+    this.loadPlace(p);
+    for (const a of e.args) this.expr(a);
+    this.emit('call', m);
+    this.storePlace(p);
+    this.release(...p.temps);
   }
 
   printText(s) {

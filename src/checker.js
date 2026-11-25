@@ -42,6 +42,7 @@ class Checker {
     this.arrays = [];
     this.consts = [];
     this.structs = [];
+    this.impls = [];
     this.fn = null;
     this.scopes = [];
     this.loops = 0;
@@ -65,6 +66,10 @@ class Checker {
       this.origin = s.origin;
       this.resolveStruct(s);
     }
+    for (const { item, origin } of this.impls) {
+      this.origin = origin;
+      this.declareImpl(item, origin);
+    }
     for (const f of this.funcs) {
       this.origin = f.origin;
       this.resolveSignature(f);
@@ -83,6 +88,10 @@ class Checker {
   // ------------------------------------------------------------ declarations
 
   declare(item, origin) {
+    if (item.kind === 'Impl') {
+      this.impls.push({ item, origin }); // handled once all structs are known
+      return;
+    }
     const name = item.name;
     const span = item.nameSpan ?? item.span;
     if (isBuiltinName(name)) {
@@ -108,7 +117,7 @@ class Checker {
       this.funcs.push(sym);
     } else if (item.kind === 'Struct') {
       sym = {
-        kind: 'struct', name, decl: item, origin, fields: [], state: 'pending',
+        kind: 'struct', name, decl: item, origin, fields: [], state: 'pending', methods: new Map(),
         toString() {
           return this.name;
         },
@@ -166,7 +175,40 @@ class Checker {
     return true;
   }
 
+  /** Methods are functions named like 'Vec3.length', registered on their struct. */
+  declareImpl(item, origin) {
+    const S = this.top.get(item.target);
+    if (!S || S.kind !== 'struct') {
+      if (SCALARS.includes(item.target)) {
+        this.err(`methods can only be added to structs, not to ${item.target}`, item.targetSpan);
+      } else {
+        const s = suggest(item.target, this.structs.map((x) => x.name));
+        this.err(`unknown struct '${item.target}'`, item.targetSpan, s ? `did you mean '${s}'?` : undefined);
+      }
+      return;
+    }
+    for (const m of item.methods) {
+      if (S.methods.has(m.name)) {
+        this.err(`${S.name} already has a method named '${m.name}'`, m.nameSpan);
+        continue;
+      }
+      if (S.decl.fields.some((f) => f.name === m.name)) {
+        this.err(`${S.name} has a field named '${m.name}', so a method can't use that name too`, m.nameSpan);
+        continue;
+      }
+      const sym = {
+        kind: 'func', name: `${S.name}.${m.name}`, methodName: m.name, owner: S, selfMode: m.self,
+        decl: m, origin, exported: false,
+        calls: new Set(), imports: new Set(), globals: new Set(), arrays: new Set(),
+        locals: [], params: [], ret: 'void', paramLeafCount: 0,
+      };
+      S.methods.set(m.name, sym);
+      this.funcs.push(sym);
+    }
+  }
+
   resolveSignature(f) {
+    if (f.selfMode) f.params.push({ name: 'self', type: f.owner });
     const seen = new Set();
     for (const p of f.decl.params) {
       if (seen.has(p.name)) this.err(`parameter '${p.name}' is declared twice`, p.span);
@@ -350,7 +392,12 @@ class Checker {
     this.origin = sym.origin;
     this.scopes = [new Map()];
     this.loops = 0;
-    sym.decl.params.forEach((p, i) => this.declareLocal(p.name, sym.params[i].type, false, false));
+    let first = 0;
+    if (sym.selfMode) {
+      this.declareLocal('self', sym.owner, sym.selfMode === 'var', false).isSelf = true;
+      first = 1;
+    }
+    sym.decl.params.forEach((p, i) => this.declareLocal(p.name, sym.params[first + i].type, false, false));
     sym.paramLeafCount = sym.locals.length;
     this.block(sym.decl.body);
     if (sym.ret !== 'void' && sym.ret !== 'error' && !returns(sym.decl.body)) {
@@ -523,17 +570,22 @@ class Checker {
   }
 
   /** Can this element/field chain be assigned to? Reports why not. */
-  assignable(tgt) {
+  /**
+   * Can this place be changed? Reports why not. `verb` customizes the message
+   * for method calls ("call 'grow' on").
+   */
+  assignable(tgt, verb) {
     let root = tgt;
     while (root.kind === 'Field') root = root.target;
     const what = describeTarget(tgt);
+    const act = `${verb ?? 'modify'} '${what}'`;
     if (root.kind === 'Index') {
       if (root.indexKind === 'str') {
         this.err('strings are immutable', tgt.span);
         return false;
       }
       if (root.indexKind === 'array' && !root.sym.mutable) {
-        this.err(`can't modify '${what}' because '${root.sym.name}' was declared with 'let'`, tgt.span, `declare it with 'var ${root.sym.name}' to make it mutable`);
+        this.err(`can't ${act} because '${root.sym.name}' was declared with 'let'`, tgt.span, `declare it with 'var ${root.sym.name}' to make it mutable`);
         return false;
       }
       return true;
@@ -542,14 +594,20 @@ class Checker {
       const sym = root.sym;
       if (sym.kind === 'global') return true;
       if (sym.kind === 'local' && sym.mutable && !sym.loopVar) return true;
-      if (sym.kind === 'local') {
-        this.err(`can't modify '${what}' because '${sym.name}' is immutable`, tgt.span, `declare it with 'var ${sym.name}' to make it mutable`);
+      if (sym.kind === 'local' && sym.isSelf) {
+        this.err(`can't ${act} because 'self' is a copy here`, tgt.span, "declare the method with 'var self' to let it change the value it's called on");
+      } else if (sym.kind === 'local') {
+        this.err(`can't ${act} because '${sym.name}' is immutable`, tgt.span, `declare it with 'var ${sym.name}' to make it mutable`);
       } else {
-        this.err(`can't modify '${what}' because '${sym.name}' is a constant`, tgt.span);
+        this.err(`can't ${act} because '${sym.name}' is a constant`, tgt.span);
       }
       return false;
     }
-    this.err(`can't assign to a field of a temporary value`, tgt.span, 'store it in a variable first');
+    if (verb) {
+      this.err(`can't ${verb} a temporary value`, tgt.span, 'this method changes the value it is called on (var self), so it needs a variable');
+    } else {
+      this.err(`can't assign to a field of a temporary value`, tgt.span, 'store it in a variable first');
+    }
     return false;
   }
 
@@ -650,6 +708,8 @@ class Checker {
       }
       case 'Call':
         return this.call(e);
+      case 'MethodCall':
+        return this.methodCall(e);
       case 'Field': {
         const t = this.expr(e.target);
         if (t === 'error') return t;
@@ -896,9 +956,88 @@ class Checker {
       return sig.ret;
     }
     e.args.forEach((a) => this.expr(a));
+    const owner = this.structs.find((st) => st.methods.has(name));
+    if (owner) {
+      this.err(`unknown function '${name}'`, e.calleeSpan, `'${name}' is a method of ${owner.name}; call it on a value: value.${name}(...)`);
+      return 'error';
+    }
     const s = suggest(name, [...this.top.keys(), ...Object.keys(INTRINSICS), ...SPECIAL, ...Object.keys(IMPORTS)]);
     this.err(`unknown function '${name}'`, e.calleeSpan, s ? `did you mean '${s}'?` : undefined);
     return 'error';
+  }
+
+  methodSignature(m) {
+    const params = m.params.map((p) => (p.name === 'self' ? (m.selfMode === 'var' ? 'var self' : 'self') : `${p.name}: ${p.type}`));
+    return signatureText(m.name, params, m.ret);
+  }
+
+  noMethod(S, e) {
+    if (S.fields.some((f) => f.name === e.name)) {
+      this.err(`'${e.name}' is a field of ${S.name}, not a method`, e.nameSpan, `read it without parentheses: value.${e.name}`);
+      return;
+    }
+    const names = [...S.methods.keys()];
+    const s = suggest(e.name, names);
+    const hint = s ? `did you mean '${s}'?` : names.length ? `its methods are: ${names.join(', ')}` : `add one: impl ${S.name} { fn ${e.name}(self) { ... } }`;
+    this.err(`${S.name} has no method '${e.name}'`, e.nameSpan, hint);
+  }
+
+  /** value.method(args), or Type.method(args) for a method without self. */
+  methodCall(e) {
+    const r = e.receiver;
+    const bail = () => {
+      e.args.forEach((a) => this.expr(a));
+      return 'error';
+    };
+    if (r.kind === 'Ident' && !this.lookupLocal(r.name)) {
+      const S = this.top.get(r.name);
+      if (S && S.kind === 'struct') {
+        e.callee = `${S.name}.${e.name}`;
+        const m = S.methods.get(e.name);
+        if (!m) {
+          this.noMethod(S, e);
+          return bail();
+        }
+        if (m.selfMode) {
+          this.err(`'${e.callee}' works on a value; call it like value.${e.name}(...)`, e.nameSpan);
+          return bail();
+        }
+        if (!this.fn) {
+          this.err(`methods can't be called in constant expressions`, e.span);
+          return bail();
+        }
+        this.checkArgs(e, m.params.map((p) => p.type), this.methodSignature(m));
+        this.fn.calls.add(m);
+        e.method = m;
+        e.isStatic = true;
+        return m.ret;
+      }
+    }
+    const t = this.expr(r);
+    if (t === 'error') return bail();
+    if (!isStruct(t)) {
+      this.err(`${t} values don't have methods`, e.nameSpan);
+      return bail();
+    }
+    e.callee = `${t.name}.${e.name}`;
+    const m = t.methods.get(e.name);
+    if (!m) {
+      this.noMethod(t, e);
+      return bail();
+    }
+    if (!m.selfMode) {
+      this.err(`'${e.callee}' doesn't take self; call it as ${e.callee}(...)`, e.nameSpan);
+      return bail();
+    }
+    if (!this.fn) {
+      this.err(`methods can't be called in constant expressions`, e.span);
+      return bail();
+    }
+    if (m.selfMode === 'var' && !this.assignable(r, `call '${e.name}' on`)) return bail();
+    this.checkArgs(e, m.params.slice(1).map((p) => p.type), this.methodSignature(m));
+    this.fn.calls.add(m);
+    e.method = m;
+    return m.ret;
   }
 
   checkArgs(e, params, sigText) {

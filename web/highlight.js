@@ -1,6 +1,6 @@
 // Syntax highlighting for Kiln source and WAT listings, producing HTML.
 
-const KEYWORDS = new Set(['fn', 'let', 'var', 'const', 'if', 'else', 'while', 'for', 'in', 'break', 'continue', 'return', 'true', 'false', 'as', 'export', 'struct']);
+const KEYWORDS = new Set(['fn', 'let', 'var', 'const', 'if', 'else', 'while', 'for', 'in', 'break', 'continue', 'return', 'true', 'false', 'as', 'export', 'struct', 'impl', 'self']);
 const TYPES = new Set(['int', 'float', 'bool', 'str']);
 
 const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|("(?:[^"\\\n]|\\.)*"?)|(0[xX][0-9a-fA-F_]*|0[bB][01_]*|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)|([A-Za-z_]\w*)|(\s+)|([\s\S])/g;

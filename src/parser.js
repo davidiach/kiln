@@ -100,7 +100,24 @@ class Parser {
     if (this.is('let') || this.is('var')) return this.global();
     if (this.is('const')) return this.constDecl();
     if (this.is('struct')) return this.structDecl();
-    throw this.error(`expected a function, 'struct', 'let', 'var' or 'const' at top level, found ${this.describe(t)}`, t);
+    if (this.is('impl')) return this.implBlock();
+    throw this.error(`expected a function, 'struct', 'impl', 'let', 'var' or 'const' at top level, found ${this.describe(t)}`, t);
+  }
+
+  /** impl Name { fn method(self, ...) { } ... } */
+  implBlock() {
+    const kw = this.expect('impl');
+    const nameTok = this.ident('a struct name');
+    const open = this.expect('{', `after 'impl ${nameTok.text}'`);
+    const methods = [];
+    while (!this.is('}')) {
+      if (this.peek().kind === 'eof') throw this.error("unclosed impl block: expected '}'", open);
+      if (this.is('export')) throw this.error("methods can't be exported; export a plain function that calls the method instead");
+      if (!this.is('fn')) throw this.error(`only methods ('fn ...') can go inside an impl block, found ${this.describe(this.peek())}`);
+      methods.push(this.fn(false, this.peek(), true));
+    }
+    this.next();
+    return { kind: 'Impl', target: nameTok.text, targetSpan: nameTok, methods, span: kw };
   }
 
   structDecl() {
@@ -123,12 +140,33 @@ class Parser {
     return { kind: 'Struct', name: nameTok.text, nameSpan: nameTok, fields, span: nameTok };
   }
 
-  fn(exported, startTok) {
+  fn(exported, startTok, isMethod = false) {
     this.expect('fn');
-    const nameTok = this.ident('a function name');
+    const nameTok = this.ident(isMethod ? 'a method name' : 'a function name');
     this.expect('(', 'after function name');
     const params = [];
+    // A method's first parameter may be `self` (a copy of the value it's
+    // called on) or `var self` (it may change that value).
+    let self = null;
+    let selfSpan = null;
+    if (isMethod) {
+      const t0 = this.peek();
+      const t1 = this.peek(1);
+      if (t0.kind === 'ident' && t0.text === 'self' && !(t1.kind === 'punct' && t1.text === ':')) {
+        self = 'value';
+        selfSpan = this.next();
+      } else if (t0.kind === 'keyword' && t0.text === 'var' && t1.kind === 'ident' && t1.text === 'self') {
+        this.next();
+        self = 'var';
+        selfSpan = this.next();
+      }
+      if (self && !this.is(')')) this.expect(',', "after 'self'");
+    }
     while (!this.is(')')) {
+      const t = this.peek();
+      if (t.kind === 'ident' && t.text === 'self') {
+        throw this.error(isMethod ? "'self' must be the first parameter" : "'self' can only be used in methods, inside an impl block");
+      }
       const pTok = this.ident('a parameter name');
       this.expect(':', `after parameter '${pTok.text}' (parameters need a type, like '${pTok.text}: int')`);
       const type = this.type();
@@ -148,6 +186,8 @@ class Parser {
       ret,
       body,
       exported,
+      self,
+      selfSpan,
       span: join(startTok, nameTok),
       endSpan: this.prev(),
     };
@@ -230,6 +270,7 @@ class Parser {
     if (this.is('fn')) throw this.error('functions must be declared at top level, not inside other functions');
     if (this.is('const')) throw this.error("'const' declarations must be at top level; use 'let' inside functions");
     if (this.is('struct')) throw this.error('structs must be declared at top level');
+    if (this.is('impl')) throw this.error('impl blocks must be at top level');
 
     const expr = this.expr();
     const opTok = this.peek();
@@ -344,7 +385,17 @@ class Parser {
   postfix() {
     let e = this.primary();
     for (;;) {
-      if (this.is('(')) {
+      if (this.is('(') && e.kind === 'Field') {
+        // value.method(args) or Type.method(args)
+        this.next();
+        const args = [];
+        while (!this.is(')')) {
+          args.push(this.expr());
+          if (!this.eat(',')) break;
+        }
+        const close = this.expect(')', 'to close the argument list');
+        e = { kind: 'MethodCall', receiver: e.target, name: e.name, nameSpan: e.nameSpan, args, span: join(e.span, close) };
+      } else if (this.is('(')) {
         if (e.kind !== 'Ident') throw this.error('only named functions can be called');
         this.next();
         const args = [];

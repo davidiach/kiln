@@ -86,6 +86,15 @@ var b = Ball(Vec2(10, 20), UP * 3.0, 0xff8800);
 b.pos += b.vel * dt;            // component-wise math
 balls[0] = b;                   // structs are values: this copies
 balls[0].vel.y -= 1.0;</pre>
+        <h3>Methods</h3>
+        <pre>impl Vec2 {
+  fn zero() -&gt; Vec2 { return Vec2(0.0, 0.0); }      // Vec2.zero()
+  fn length(self) -&gt; float {                       // v.length()
+    return sqrt(self.x * self.x + self.y * self.y);
+  }
+  fn grow(var self, k: float) { self *= k; }       // v.grow(2.0) changes v
+}</pre>
+        <p><code>self</code> is a copy of the value the method is called on. A <code>var self</code> method changes that value, so it can be called on variables, array elements and fields, but not on temporaries. A method without <code>self</code> is called on the type.</p>
         <p>Structs whose fields are all floats (or all ints) support <code>+ - * / %</code> with each other and with a single number. Any struct supports <code>==</code> and <code>!=</code>. <code>print(v)</code> shows <code>Vec2(1.0, 2.0)</code>.</p>
         <h3>Sound</h3>
         <pre>beep(440.0, 0.2);                       // frequency in Hz, seconds

@@ -2,11 +2,41 @@
 // The fountain follows your mouse. The screen fades a little every frame
 // instead of being cleared, which leaves glowing trails.
 //
-// Each particle is a struct in an array. The update loop copies one into a
-// local, changes it, and writes it back: structs are plain values.
+// Each particle is a struct in an array, with an update method that takes
+// 'var self': parts[i].update(dt) changes that particle in place.
 
 struct Vec2 { x: float, y: float }
 struct Particle { pos: Vec2, vel: Vec2, life: float, color: int }
+
+impl Particle {
+  fn alive(self) -> bool {
+    return self.life > 0.0;
+  }
+
+  // Gravity, motion, a bounce off the floor and the side walls.
+  fn update(var self, dt: float) {
+    self.vel += GRAVITY * dt;
+    self.pos += self.vel * dt;
+    let floor_y = HEIGHT as float - 1.0;
+    if self.pos.y > floor_y {
+      self.pos.y = floor_y;
+      self.vel.y *= -0.55;
+      self.vel.x *= 0.8;
+    }
+    if self.pos.x < 0.0 || self.pos.x >= WIDTH as float { self.vel.x = -self.vel.x; }
+    self.life -= dt * 0.35;
+  }
+
+  // Add this particle's light to the pixel under it.
+  fn draw(self) {
+    let x = self.pos.x as int;
+    let y = self.pos.y as int;
+    if x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT {
+      let k = y * WIDTH + x;
+      screen[k] = add(screen[k], self.color);
+    }
+  }
+}
 
 const N = 4000;
 const GRAVITY = Vec2(0.0, 260.0);
@@ -46,27 +76,10 @@ fn frame(t: float) {
   emitter += (target - emitter) * 0.15;
   for k in 0..40 { spawn(t); }
 
-  let floor_y = HEIGHT as float - 1.0;
   for i in 0..N {
-    if parts[i].life <= 0.0 { continue; }
-    var p = parts[i];
-    p.vel += GRAVITY * dt;
-    p.pos += p.vel * dt;
-    if p.pos.y > floor_y {
-      p.pos.y = floor_y;
-      p.vel.y *= -0.55;
-      p.vel.x *= 0.8;
-    }
-    if p.pos.x < 0.0 || p.pos.x >= WIDTH as float { p.vel.x = -p.vel.x; }
-    p.life -= dt * 0.35;
-    parts[i] = p;
-
-    let x = p.pos.x as int;
-    let y = p.pos.y as int;
-    if x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT {
-      let k = y * WIDTH + x;
-      screen[k] = add(screen[k], p.color);
-    }
+    if !parts[i].alive() { continue; }
+    parts[i].update(dt);
+    parts[i].draw();
   }
   text(4, 4, "MOVE THE MOUSE", 0x808080);
 }
