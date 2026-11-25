@@ -1,28 +1,42 @@
-// The Mandelbrot set, zooming forever into a spiral.
-// Each pixel iterates z = z * z + c up to a few hundred times, where z and
-// c are complex numbers: a struct with its own '*' operator.
+// The Mandelbrot set, zooming forever into a spiral, two pixels at a time.
+// Each pixel iterates z = z * z + c up to a few hundred times. Deep in the
+// zoom, neighboring pixels differ by less than an f32 can tell apart, so this
+// uses f64x2: two 64-bit floats in one SIMD register. C2 holds two complex
+// numbers, with its own '*' operator.
 // Smooth coloring hides the bands.
 
-struct Complex { re: float, im: float }
+struct C2 { re: f64x2, im: f64x2 }
 
-impl Complex {
-  // (a + bi)(c + di) = (ac - bd) + (ad + bc)i
-  fn *(self, o: Complex) -> Complex {
-    return Complex(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re);
+impl C2 {
+  // (a + bi)(c + di) = (ac - bd) + (ad + bc)i, in both lanes
+  fn *(self, o: C2) -> C2 {
+    return C2(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re);
   }
-  // '+' isn't defined here: structs whose fields are all floats already add
+  // '+' isn't defined here: structs whose fields are all f64x2 already add
   // component-wise, which is exactly complex addition.
-  fn abs2(self) -> float {
+  fn abs2(self) -> f64x2 {
     return self.re * self.re + self.im * self.im;
   }
 }
 
-let CENTER = Complex(-0.743643887037151, 0.131825904205330);
+let CX = -0.743643887037151;
+let CY = 0.131825904205330;
+let LANES = f64x2(0.0, 1.0);   // x offsets of the two pixels
 
 fn palette(t: float) -> int {
   return rgbf(0.5 + 0.5 * cos(TAU * (t + 0.0)),
               0.5 + 0.5 * cos(TAU * (t + 0.1)),
               0.5 + 0.5 * cos(TAU * (t + 0.2)));
+}
+
+fn shade(x: int, y: int, n: float, z2: float, t: float, max_iter: int) {
+  if n as int == max_iter {
+    pixel(x, y, 0x000000);
+    return;
+  }
+  // fractional iteration count -> no visible bands
+  let smooth = n + 1.0 - log(log(sqrt(z2))) / log(2.0);
+  pixel(x, y, palette(smooth * 0.02 + t * 0.03));
 }
 
 fn frame(t: float) {
@@ -32,21 +46,22 @@ fn frame(t: float) {
   let max_iter = 120 + (phase * 12.0) as int;
 
   for py in 0..HEIGHT {
-    for px in 0..WIDTH {
-      let c = CENTER + Complex((px - WIDTH / 2) as float, (py - HEIGHT / 2) as float) * scale;
-      var z = Complex(0.0, 0.0);
-      var i = 0;
-      while i < max_iter && z.abs2() < 256.0 {
-        z = z * z + c;
-        i += 1;
+    let ci = f64x2(CY + (py - HEIGHT / 2) as float * scale);
+    for qx in 0..WIDTH / 2 {
+      let px = qx * 2;
+      let c = C2(CX + (LANES + (px - WIDTH / 2) as float) * scale, ci);
+      var z = C2(f64x2(0.0), f64x2(0.0));
+      var n = f64x2(0.0);
+      for i in 0..max_iter {
+        let inside = z.abs2() < 256.0;      // which lanes haven't escaped
+        if !any(inside) { break; }
+        n += inside as f64x2;               // count only those
+        let next = z * z + c;
+        z = C2(select(inside, next.re, z.re), select(inside, next.im, z.im));
       }
-      if i == max_iter {
-        pixel(px, py, 0x000000);
-      } else {
-        // fractional iteration count -> no visible bands
-        let smooth = i as float + 1.0 - log(log(sqrt(z.abs2()))) / log(2.0);
-        pixel(px, py, palette(smooth * 0.02 + t * 0.03));
-      }
+      let z2 = z.abs2();
+      shade(px, py, n.x, z2.x, t, max_iter);
+      shade(px + 1, py, n.y, z2.y, t, max_iter);
     }
   }
 }
