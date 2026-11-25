@@ -12,7 +12,7 @@
 
 import { ByteWriter, OPS, SECTION, I32, F64, VOID_BLOCK, valType, valTypeName, f64Text } from './wasm.js';
 import { IMPORTS } from './builtins.js';
-import { isStruct, leafTypes, numericKind, sizeOf, alignOf, isVector, laneType } from './types.js';
+import { isStruct, leafTypes, numericKind, sizeOf, alignOf, isVector, isMask, laneType, laneCount, shapeOf } from './types.js';
 import { printImport, laneValue } from './checker.js';
 
 const textEncoder = new TextEncoder();
@@ -38,12 +38,19 @@ const TEMP_POOL = { float: 'f64', v128: 'v128', int: 'i32' };
 const SHIFTS = new Set(['<<', '>>', '>>>']);
 
 /** A vector constant's lanes as the bits wasm stores: bool lanes are -1 or 0. */
-const vectorBits = (V, lanes) => (V === 'boolx4' ? lanes.map((b) => (b ? -1 : 0)) : lanes);
+const vectorBits = (V, lanes) => (isMask(V) ? lanes.map((b) => (b ? -1 : 0)) : lanes);
+
+/** How a vector's lanes are written in a v128.const: 'f32', 'i32', 'f64' or 'i64'. */
+const laneKind = (V) => shapeOf(V).slice(0, 3);
 
 function v128Text(V, lanes) {
   const bits = vectorBits(V, lanes);
-  return V === 'f32x4' ? `f32x4 ${bits.map(f64Text).join(' ')}` : `i32x4 ${bits.join(' ')}`;
+  const shape = shapeOf(V);
+  return `${shape} ${(shape[0] === 'f' ? bits.map(f64Text) : bits).join(' ')}`;
 }
+
+/** `x` in every lane of a `V`. */
+const lanesOf = (V, x) => Array.from({ length: laneCount(V) }, () => x);
 
 /**
  * What a function leaves on the stack when it returns: its return value's
@@ -235,7 +242,7 @@ class Generator {
         w.vec(allGlobals, (g) => {
           w.u8(valType(g.type)).u8(g.mutable ? 1 : 0);
           if (g.type === 'float') w.u8(0x44).f64(g.value);
-          else if (isVector(g.type)) w.raw(OPS['v128.const'].slice(0, -1)).v128(g.value, g.type === 'f32x4');
+          else if (isVector(g.type)) w.raw(OPS['v128.const'].slice(0, -1)).v128(g.value, laneKind(g.type));
           else w.u8(0x41).s32(g.value);
           w.u8(0x0b);
         }),
@@ -341,8 +348,7 @@ class Generator {
         const off = i * size + offsets[j];
         const x = this.leafValue(t, vals[j]);
         if (t === 'float') view.setFloat64(off, x, true);
-        else if (t === 'f32x4') x.forEach((lane, k) => view.setFloat32(off + 4 * k, lane, true));
-        else if (isVector(t)) x.forEach((lane, k) => view.setInt32(off + 4 * k, lane, true));
+        else if (isVector(t)) new ByteWriter().v128(x, laneKind(t)).bytes.forEach((b, k) => view.setUint8(off + k, b));
         else view.setInt32(off, x, true);
       });
     });
@@ -541,7 +547,7 @@ class FnGen {
           break;
         case 'v128': {
           const [V, lanes] = args;
-          this.code.v128(vectorBits(V, lanes), V === 'f32x4');
+          this.code.v128(vectorBits(V, lanes), laneKind(V));
           text += ` ${v128Text(V, lanes)}`;
           break;
         }
@@ -659,56 +665,53 @@ class FnGen {
   /** Push scalar `e` into all four lanes; a constant becomes one v128.const. */
   pushSplat(e, V) {
     if (e.constValue !== undefined) {
-      const c = laneValue(V, e.constValue);
-      this.emit('v128.const', V, [c, c, c, c]);
+      this.emit('v128.const', V, lanesOf(V, laneValue(V, e.constValue)));
       return;
     }
     this.expr(e);
     this.splat(V);
   }
 
-  /** Stack: [scalar] -> [vector with the scalar in all four lanes]. */
-  splat(V) {
-    if (V === 'f32x4') {
-      this.emit('f32.demote_f64');
-      this.emit('f32x4.splat');
-    } else {
-      this.emit('i32x4.splat');
-      if (V === 'boolx4') this.emit('i32x4.neg'); // true is 1 as a bool, all ones as a lane
+  /**
+   * Stack: [Kiln scalar] -> [the value one lane of V holds]. A float becomes
+   * an f32 for f32x4; a bool (1 or 0) becomes all ones or all zeros.
+   */
+  toLane(V) {
+    if (V === 'f32x4') this.emit('f32.demote_f64');
+    if (isMask(V)) {
+      this.emit('i32.const', -1);
+      this.emit('i32.mul');
+      if (V === 'boolx2') this.emit('i64.extend_i32_s');
     }
+  }
+
+  /** Stack: [scalar] -> [vector with the scalar in every lane]. */
+  splat(V) {
+    this.toLane(V);
+    this.emit(`${shapeOf(V)}.splat`);
   }
 
   /** Stack: [vector] -> [lane as a Kiln scalar]. */
   extractLane(V, lane) {
-    if (V === 'f32x4') {
-      this.emit('f32x4.extract_lane', lane);
-      this.emit('f64.promote_f32');
-    } else {
-      this.emit('i32x4.extract_lane', lane);
-      if (V === 'boolx4') {
-        this.emit('i32.const', 1);
-        this.emit('i32.and');
-      }
+    this.emit(`${shapeOf(V)}.extract_lane`, lane);
+    if (V === 'f32x4') this.emit('f64.promote_f32');
+    if (V === 'boolx2') this.emit('i32.wrap_i64');
+    if (isMask(V)) {
+      this.emit('i32.const', 1); // all ones -> 1
+      this.emit('i32.and');
     }
   }
 
   /** Stack: [vector, scalar] -> [vector with that lane replaced]. */
   replaceLane(V, lane) {
-    if (V === 'f32x4') {
-      this.emit('f32.demote_f64');
-      this.emit('f32x4.replace_lane', lane);
-    } else {
-      if (V === 'boolx4') {
-        this.emit('i32.const', -1);
-        this.emit('i32.mul');
-      }
-      this.emit('i32x4.replace_lane', lane);
-    }
+    this.toLane(V);
+    this.emit(`${shapeOf(V)}.replace_lane`, lane);
   }
 
   /** Lane-wise operator on two vectors on the stack (a shift takes an int count instead). */
   vecop(op, V, node) {
-    if (V === 'f32x4') {
+    const shape = shapeOf(V);
+    if (laneType(V) === 'float') {
       if (op === '%') {
         // like float %: a - trunc(a / b) * b
         const a = this.temp('v128');
@@ -717,21 +720,26 @@ class FnGen {
         this.emit('local.tee', a);
         this.emit('local.get', a);
         this.emit('local.get', b);
-        this.emit('f32x4.div');
-        this.emit('f32x4.trunc');
+        this.emit(`${shape}.div`);
+        this.emit(`${shape}.trunc`);
         this.emit('local.get', b);
-        this.emit('f32x4.mul');
-        this.emit('f32x4.sub');
+        this.emit(`${shape}.mul`);
+        this.emit(`${shape}.sub`);
         this.release(a, b);
         return;
       }
       const F = { '+': 'add', '-': 'sub', '*': 'mul', '/': 'div', '==': 'eq', '!=': 'ne', '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge' };
-      this.emit('f32x4.' + F[op]);
+      this.emit(`${shape}.${F[op]}`);
       return;
     }
     const BITS = { '&': 'v128.and', '|': 'v128.or', '^': 'v128.xor' };
     if (op in BITS) {
       this.emit(BITS[op]);
+      return;
+    }
+    if (V === 'boolx2') {
+      // masks only compare for (in)equality; i64x2 has eq and ne
+      this.emit(op === '==' ? 'i64x2.eq' : 'i64x2.ne');
       return;
     }
     const I = {
@@ -994,7 +1002,7 @@ class FnGen {
 
   zero(type) {
     if (type === 'float') this.emit('f64.const', 0);
-    else if (isVector(type)) this.emit('v128.const', type, [0, 0, 0, 0]);
+    else if (isVector(type)) this.emit('v128.const', type, lanesOf(type, 0));
     else this.emit('i32.const', 0);
   }
 
@@ -1240,7 +1248,7 @@ class FnGen {
       this.emit('f64.neg');
     } else if (isVector(type)) {
       push();
-      this.emit(type === 'f32x4' ? 'f32x4.neg' : 'i32x4.neg');
+      this.emit(`${shapeOf(type)}.neg`);
     } else {
       this.emit('i32.const', 0);
       push();
@@ -1277,8 +1285,8 @@ class FnGen {
       this.emit('local.get', A.locals[i]);
       this.emit('local.get', B.locals[i]);
       if (isVector(t)) {
-        this.emit(t === 'f32x4' ? 'f32x4.eq' : 'i32x4.eq');
-        this.emit('i32x4.all_true');
+        this.emit(`${shapeOf(t)}.eq`);
+        this.emit(laneCount(t) === 2 ? 'i64x2.all_true' : 'i32x4.all_true');
       } else {
         this.emit(t === 'float' ? 'f64.eq' : 'i32.eq');
       }
@@ -1343,12 +1351,18 @@ class FnGen {
   convert(from, to) {
     if (from === to) return;
     if (isVector(to)) {
-      if (from === 'boolx4') this.emit('i32x4.neg'); // all ones -> 1
-      if (to === 'f32x4') this.emit('f32x4.convert_i32x4_s');
-      else if (to === 'i32x4' && from === 'f32x4') this.emit('i32x4.trunc_sat_f32x4_s');
-      else if (to === 'boolx4') {
-        this.emit('v128.const', from, [0, 0, 0, 0]);
-        this.emit(from === 'f32x4' ? 'f32x4.ne' : 'i32x4.ne');
+      if (isMask(to)) {
+        // nonzero lanes are true
+        this.emit('v128.const', from, lanesOf(from, 0));
+        this.emit(`${shapeOf(from)}.ne`);
+      } else if (to === 'f64x2') {
+        // from boolx2: all ones & the bits of 1.0 is 1.0, all zeros gives 0.0
+        this.emit('v128.const', 'f64x2', [1, 1]);
+        this.emit('v128.and');
+      } else {
+        if (from === 'boolx4') this.emit('i32x4.neg'); // all ones -> 1
+        if (to === 'f32x4') this.emit('f32x4.convert_i32x4_s');
+        else if (from === 'f32x4') this.emit('i32x4.trunc_sat_f32x4_s');
       }
       return;
     }
@@ -1509,7 +1523,7 @@ class FnGen {
   /** Prints like the constructor: f32x4(1.0, 2.5, 3.0, 4.0) */
   printVector(V, local) {
     this.printText(`${V}(`);
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < laneCount(V); i++) {
       if (i) this.printText(', ');
       this.emit('local.get', local);
       this.extractLane(V, i);
@@ -1518,13 +1532,14 @@ class FnGen {
     this.printText(')');
   }
 
-  /** Lane-wise intrinsics; a scalar argument fills all four lanes. */
+  /** Lane-wise intrinsics; a scalar argument fills every lane. */
   vectorIntrinsic(e) {
     const name = e.callee;
     const [params, V] = e.overload;
     if (name === 'any' || name === 'all') {
       this.expr(e.args[0]);
-      this.emit(name === 'any' ? 'v128.any_true' : 'i32x4.all_true');
+      if (name === 'any') this.emit('v128.any_true');
+      else this.emit(params[0] === 'boolx2' ? 'i64x2.all_true' : 'i32x4.all_true');
       return;
     }
     if (name === 'to_bits' || name === 'from_bits') {
@@ -1533,17 +1548,18 @@ class FnGen {
       this.comment(`${name}: the same 128 bits, now read as ${V}`);
       return;
     }
+    const shape = shapeOf(V);
     const isInt = V === 'i32x4';
     const arg = (i) => {
       if (!isVector(params[i])) this.pushSplat(e.args[i], V);
       else this.expr(e.args[i]);
     };
-    const unary = { sqrt: 'f32x4.sqrt', floor: 'f32x4.floor', ceil: 'f32x4.ceil', trunc: 'f32x4.trunc', round: 'f32x4.nearest' };
-    const min = isInt ? 'i32x4.min_s' : 'f32x4.min';
-    const max = isInt ? 'i32x4.max_s' : 'f32x4.max';
+    const unary = { sqrt: 'sqrt', floor: 'floor', ceil: 'ceil', trunc: 'trunc', round: 'nearest' };
+    const min = isInt ? 'i32x4.min_s' : `${shape}.min`;
+    const max = isInt ? 'i32x4.max_s' : `${shape}.max`;
     arg(0);
-    if (name in unary) this.emit(unary[name]);
-    else if (name === 'abs') this.emit(isInt ? 'i32x4.abs' : 'f32x4.abs');
+    if (name in unary) this.emit(`${shape}.${unary[name]}`);
+    else if (name === 'abs') this.emit(`${shape}.abs`);
     else if (name === 'min' || name === 'max') {
       arg(1);
       this.emit(name === 'min' ? min : max);

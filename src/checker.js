@@ -9,7 +9,10 @@
 
 import { CompileError, suggest } from './errors.js';
 import { INTRINSICS, IMPORTS, SPECIAL, FOLDABLE, nearest, isBuiltinName, signatureText } from './builtins.js';
-import { isStruct, leafTypes, leafCount, numericKind, layoutStruct, sizeOf, isVector, laneType, vectorOf, VECTORS, LANE_NAMES } from './types.js';
+import {
+  isStruct, leafTypes, leafCount, numericKind, layoutStruct, sizeOf,
+  isVector, isMask, laneType, laneCount, laneNames, maskOf, vectorOf, VECTORS,
+} from './types.js';
 
 const SCALARS = ['int', 'float', 'bool', 'str'];
 const ARITH = new Set(['+', '-', '*', '/', '%']);
@@ -553,7 +556,7 @@ class Checker {
     const t = this.expr(e);
     if (t !== 'bool' && t !== 'error') {
       let hint = t === 'int' ? 'compare explicitly, e.g. x != 0' : undefined;
-      if (t === 'boolx4') {
+      if (isMask(t)) {
         hint = what === 'conditional'
           ? 'a vector comparison gives one bool per lane; choose lane by lane with select(mask, a, b)'
           : 'a vector comparison gives one bool per lane; test them with any(mask) or all(mask)';
@@ -787,8 +790,8 @@ class Checker {
         const t = this.expr(e.operand);
         if (t === 'error') return t;
         if (isVector(t)) {
-          if ((e.op === '-' && t !== 'boolx4') || (e.op === '!' && t === 'boolx4') || (e.op === '~' && t === 'i32x4')) return t;
-          const hint = e.op === '!' ? "'!' flips the lanes of a boolx4 mask" : e.op === '~' ? "'~' works on i32x4" : undefined;
+          if ((e.op === '-' && !isMask(t)) || (e.op === '!' && isMask(t)) || (e.op === '~' && t === 'i32x4')) return t;
+          const hint = e.op === '!' ? "'!' flips the lanes of a mask (boolx4 or boolx2)" : e.op === '~' ? "'~' works on i32x4" : undefined;
           this.err(`can't apply '${e.op}' to ${t}`, e.span, hint);
           return 'error';
         }
@@ -821,10 +824,11 @@ class Checker {
         const to = this.valueType(e.to);
         if (from === 'error' || to === 'error') return 'error';
         if (isVector(from) || isVector(to)) {
-          if (isVector(from) && isVector(to)) return to;
+          if (isVector(from) && isVector(to) && laneCount(from) === laneCount(to)) return to;
           let hint;
-          if (isVector(to) && from === laneType(to)) hint = `put it in all four lanes with ${to}(x), or build one from four values`;
-          else if (isVector(from) && to === laneType(from)) hint = 'read one lane with v.x, v.y, v.z or v.w';
+          if (isVector(to) && from === laneType(to)) hint = `put it in all ${inWords(laneCount(to))} lanes with ${to}(x), or build one from ${inWords(laneCount(to))} values`;
+          else if (isVector(from) && to === laneType(from)) hint = `read one lane with ${laneNames(from).map((n) => `v.${n}`).join(', ')}`;
+          else if (isVector(from) && isVector(to)) hint = `${from} has ${laneCount(from)} lanes and ${to} has ${laneCount(to)}; read the lanes and build ${article(to)} from them`;
           this.err(`can't convert ${from} to ${to}`, e.span, hint);
           return 'error';
         }
@@ -854,9 +858,10 @@ class Checker {
         const t = this.expr(e.target);
         if (t === 'error') return t;
         if (isVector(t)) {
-          const lane = LANE_NAMES.indexOf(e.name);
+          const names = laneNames(t);
+          const lane = names.indexOf(e.name);
           if (lane < 0) {
-            this.err(`${t} has no lane '${e.name}'`, e.nameSpan, 'its lanes are x, y, z and w');
+            this.err(`${t} has no lane '${e.name}'`, e.nameSpan, `its lanes are ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
             return 'error';
           }
           e.lane = lane;
@@ -897,7 +902,7 @@ class Checker {
         const t = this.expr(e.target);
         if (t === 'error') return t;
         if (isVector(t)) {
-          this.err(`can't index into ${article(t)}`, e.target.span, 'read a lane with v.x, v.y, v.z or v.w');
+          this.err(`can't index into ${article(t)}`, e.target.span, `read a lane with ${laneNames(t).map((n) => `v.${n}`).join(', ')}`);
           return 'error';
         }
         if (t === 'str') {
@@ -996,21 +1001,21 @@ class Checker {
       if (isVector(t)) return bad(`both sides must be the same kind of vector; convert with 'as ${V}'`);
       if (t !== lane) {
         if (lane === 'float' && t === 'int' && this.coercible(e[side])) this.toFloat(e[side]);
-        else return bad(`${article(V)} can be combined with another ${V} or with ${article(lane)} (which fills all four lanes), not ${article(t)}`);
+        else return bad(`${article(V)} can be combined with another ${V} or with ${article(lane)} (which fills all ${inWords(laneCount(V))} lanes), not ${article(t)}`);
       }
       e.splatSide = side;
     }
-    if (op === '&&' || op === '||') return bad(V === 'boolx4' ? `use '${op[0]}' to combine masks lane by lane` : undefined);
+    if (op === '&&' || op === '||') return bad(isMask(V) ? `use '${op[0]}' to combine masks lane by lane` : undefined);
     if (ARITH.has(op)) {
-      if (V === 'boolx4') return bad();
+      if (isMask(V)) return bad();
       if (V === 'i32x4' && (op === '/' || op === '%')) {
         return bad("WebAssembly SIMD can't divide integer lanes; convert with 'as f32x4' first, or divide one lane at a time");
       }
       return V;
     }
-    if (COMPARE.has(op)) return V === 'boolx4' ? bad() : 'boolx4';
-    if (EQUALITY.has(op)) return 'boolx4';
-    if (BITWISE.has(op)) return V === 'f32x4' ? bad(`'${op}' works on i32x4 and boolx4`) : V;
+    if (COMPARE.has(op)) return isMask(V) ? bad() : maskOf(V);
+    if (EQUALITY.has(op)) return maskOf(V);
+    if (BITWISE.has(op)) return lane === 'float' ? bad(`'${op}' works on i32x4 and on masks`) : V;
     throw new Error(`unknown operator ${op}`);
   }
 
@@ -1172,17 +1177,18 @@ class Checker {
     return 'error';
   }
 
-  /** f32x4(a, b, c, d) builds a vector from four lanes; f32x4(a) puts a in all four. */
+  /** f32x4(a, b, c, d) builds a vector from its lanes; f32x4(a) puts a in all of them. */
   vectorCtor(e, V) {
     const lane = laneType(V);
     const types = e.args.map((a) => this.expr(a));
     const n = e.args.length;
-    if (n !== 1 && n !== 4) {
-      const ex = { f32x4: '1.0, 2.0, 3.0, 4.0', i32x4: '1, 2, 3, 4', boolx4: 'true, false, true, false' }[V];
-      this.err(`'${V}' takes 1 value (for all four lanes) or 4 values (one per lane), but ${n} ${n === 1 ? 'was' : 'were'} given`, e.span, `e.g. ${V}(${ex})`);
+    const count = laneCount(V);
+    if (n !== 1 && n !== count) {
+      const ex = { f32x4: '1.0, 2.0, 3.0, 4.0', i32x4: '1, 2, 3, 4', boolx4: 'true, false, true, false', f64x2: '1.0, 2.0', boolx2: 'true, false' }[V];
+      this.err(`'${V}' takes 1 value (for all ${inWords(count)} lanes) or ${count} values (one per lane), but ${n} ${n === 1 ? 'was' : 'were'} given`, e.span, `e.g. ${V}(${ex})`);
       return 'error';
     }
-    e.args.forEach((a, i) => this.coerce(a, types[i], lane, n === 1 ? `the value of '${V}'` : `lane ${LANE_NAMES[i]} of '${V}'`));
+    e.args.forEach((a, i) => this.coerce(a, types[i], lane, n === 1 ? `the value of '${V}'` : `lane ${laneNames(V)[i]} of '${V}'`));
     e.vecCtor = V;
     return V;
   }
@@ -1296,15 +1302,15 @@ class Checker {
       return 'error';
     }
     const ct = this.expr(e.args[0]);
-    if (ct === 'boolx4') return this.vectorSelect(e);
+    if (isMask(ct)) return this.vectorSelect(e, ct);
     if (ct !== 'bool' && ct !== 'error') {
-      this.err(`select condition must be a bool (or a boolx4 mask), found ${ct}`, e.args[0].span);
+      this.err(`select condition must be a bool (or a mask), found ${ct}`, e.args[0].span);
     }
     const a = this.expr(e.args[1]);
     const b = this.expr(e.args[2]);
     if (a === 'error' || b === 'error') return 'error';
     if (isVector(a) || isVector(b)) {
-      this.err(`'select' with vectors needs a boolx4 mask to choose lane by lane, found ${ct}`, e.args[0].span, 'compare vectors to get one, e.g. select(v < 0.0, -v, v)');
+      this.err(`'select' with vectors needs a mask to choose lane by lane, found ${ct}`, e.args[0].span, 'compare vectors to get one, e.g. select(v < 0.0, -v, v)');
       return 'error';
     }
     const t = this.unify(e.args[1], a, e.args[2], b);
@@ -1321,7 +1327,7 @@ class Checker {
   }
 
   /** select(mask, a, b): lane i comes from a where mask lane i is true, else from b. */
-  vectorSelect(e) {
+  vectorSelect(e, mask) {
     const [, A, B] = e.args;
     const a = this.expr(A);
     const b = this.expr(B);
@@ -1329,7 +1335,17 @@ class Checker {
     let V = isVector(a) ? a : isVector(b) ? b : null;
     if (!V) {
       const t = this.unify(A, a, B, b);
-      V = t ? vectorOf(t) : null;
+      V = t ? vectorOf(t, laneCount(mask)) : null;
+      // There's no two-lane int vector, but int literals adapt to floats.
+      if (!V && t === 'int' && mask === 'boolx2' && this.coercible(A) && this.coercible(B)) {
+        this.toFloat(A);
+        this.toFloat(B);
+        V = 'f64x2';
+      }
+    }
+    if (V && laneCount(V) !== laneCount(mask)) {
+      this.err(`a ${mask} mask chooses between values with ${laneCount(mask)} lanes, not ${V}`, e.span);
+      return 'error';
     }
     e.splatArgs = [false, false];
     for (const [i, node] of [[0, A], [1, B]]) {
@@ -1339,12 +1355,13 @@ class Checker {
         e.splatArgs[i] = true;
         continue;
       }
-      if (V === 'f32x4' && t === 'int' && this.coercible(node)) {
+      if (V && laneType(V) === 'float' && t === 'int' && this.coercible(node)) {
         this.toFloat(node);
         e.splatArgs[i] = true;
         continue;
       }
-      this.err(`both values given to 'select' must be the same vector type (or one of its lanes), found ${a} and ${b}`, e.span);
+      const hint = mask === 'boolx2' ? 'a boolx2 mask chooses between f64x2 values or floats' : undefined;
+      this.err(`both values given to 'select' must be the same vector type (or one of its lanes), found ${a} and ${b}`, e.span, hint);
       return 'error';
     }
     e.builtin = 'select';
@@ -1486,7 +1503,7 @@ class Checker {
         const args = e.args.map((a) => a.constValue);
         if (args.some((a) => a === undefined)) return;
         if (e.vecCtor) {
-          e.constValue = (args.length === 1 ? [0, 1, 2, 3].map(() => args[0]) : args).map((x) => laneValue(e.vecCtor, x));
+          e.constValue = (args.length === 1 ? lanesOf(e.vecCtor, args[0]) : args).map((x) => laneValue(e.vecCtor, x));
           return;
         }
         if (e.vecSelect) {
@@ -1533,14 +1550,20 @@ function article(t) {
 
 function zeroValue(t) {
   if (isStruct(t)) return t.leafTypes.map(zeroValue);
-  if (isVector(t)) return [0, 1, 2, 3].map(() => zeroValue(laneType(t)));
+  if (isVector(t)) return lanesOf(t, zeroValue(laneType(t)));
   return t === 'bool' ? false : t === 'str' ? '' : 0;
 }
+
+const inWords = (n) => ({ 2: 'two', 4: 'four' })[n];
+
+/** `x` in every lane of a `V`. */
+const lanesOf = (V, x) => Array.from({ length: laneCount(V) }, () => x);
 
 /** Normalize a lane value the way the vector stores it (f32 rounding for f32x4). */
 export function laneValue(V, x) {
   if (V === 'f32x4') return Math.fround(x);
   if (V === 'i32x4') return x | 0;
+  if (V === 'f64x2') return +x;
   return !!x;
 }
 
@@ -1565,9 +1588,9 @@ export function evalVector(op, V, l, r) {
   const lane = laneType(V);
   const L = (i) => (Array.isArray(l) ? l[i] : laneValue(V, l));
   const R = (i) => (Array.isArray(r) ? r[i] : SHIFT.has(op) ? r : laneValue(V, r));
-  return [0, 1, 2, 3].map((i) => {
+  return lanesOf(V, 0).map((_, i) => {
     if (COMPARE.has(op) || EQUALITY.has(op)) return evalBinary(op, lane, L(i), R(i));
-    if (lane === 'float') return f32op(op, L(i), R(i));
+    if (V === 'f32x4') return f32op(op, L(i), R(i));
     return laneValue(V, evalBinary(op, lane, L(i), R(i)));
   });
 }
@@ -1592,10 +1615,9 @@ function foldVectorIntrinsic(name, overload, args) {
     return (name === 'to_bits' ? args[0] : out).some(Number.isNaN) ? undefined : out;
   }
   const V = overload[1];
-  const isInt = V === 'i32x4';
-  const lanes = args.map((a) => (Array.isArray(a) ? a : [0, 1, 2, 3].map(() => laneValue(V, a))));
+  const lanes = args.map((a) => (Array.isArray(a) ? a : lanesOf(V, laneValue(V, a))));
   const [a, b, c] = lanes;
-  return [0, 1, 2, 3].map((i) => {
+  return lanesOf(V, 0).map((_, i) => {
     let v;
     if (name === 'abs') v = Math.abs(a[i]);
     else if (name === 'min') v = Math.min(a[i], b[i]);
@@ -1603,7 +1625,7 @@ function foldVectorIntrinsic(name, overload, args) {
     else if (name === 'clamp') v = Math.min(Math.max(a[i], b[i]), c[i]);
     else if (name === 'round') v = nearest(a[i]);
     else v = FOLDABLE[name](a[i]);
-    return isInt ? v | 0 : Math.fround(v);
+    return laneValue(V, v);
   });
 }
 
