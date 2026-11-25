@@ -110,6 +110,32 @@ test('impl blocks can come before the struct, and there can be several', async (
   assert.deepEqual(await run(src), ['42']);
 });
 
+// Regression from review on PR #3: a var self call inside an expression must
+// not change operands that were already read.
+test('operands keep their values when a later operand calls a var self method', async () => {
+  const src = `
+    struct V { x: int }
+    impl V { fn bump(var self) -> V { self.x += 1; return self; } }
+    fn main() {
+      var v = V(1);
+      print(v + v.bump());
+      var w = V(1);
+      print(w == w.bump(), w != V(2));
+      var p = V(1);
+      print(p, p.bump());
+      var q = V(1);
+      q += q.bump();
+      print(q);
+    }`;
+  assert.deepEqual(await run(src), ['V(3)', 'false false', 'V(1) V(2)', 'V(3)']);
+});
+
+test('struct locals are still used in place when nothing can change them', () => {
+  const r = compile(`${VEC} fn add(a: Vec2, b: Vec2) -> Vec2 { return a + b; } fn main() { print(add(Vec2(1.0, 2.0), Vec2(3.0, 4.0))); }`);
+  const body = r.wat.slice(r.wat.indexOf('(func $add'), r.wat.indexOf('(func $main'));
+  assert.doesNotMatch(body, /\$t\./, 'no copies into temporaries');
+});
+
 test('method errors', () => {
   const e = (body) => errors(`${VEC}\n${body}`);
   has(e('fn main() { let v = Vec2(1.0, 2.0); print(v.lenght()); }'), /Vec2 has no method 'lenght'.*did you mean 'length'/);

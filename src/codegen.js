@@ -15,6 +15,20 @@ import { IMPORTS } from './builtins.js';
 import { isStruct, leafTypes, numericKind, sizeOf } from './types.js';
 
 const textEncoder = new TextEncoder();
+
+/**
+ * Can evaluating this expression change a caller's variable? Only a
+ * `var self` method call can (it stores its receiver back).
+ */
+function mayMutate(e) {
+  if (!e || typeof e !== 'object') return false;
+  if (e.mayMutate !== undefined) return e.mayMutate;
+  let m = e.kind === 'MethodCall' && e.method?.selfMode === 'var';
+  for (const k of ['left', 'right', 'operand', 'expr', 'cond', 'then', 'else', 'target', 'index', 'receiver']) m ||= mayMutate(e[k]);
+  if (e.args) for (const a of e.args) m ||= mayMutate(a);
+  e.mayMutate = m;
+  return m;
+}
 const align = (n, a) => Math.ceil(n / a) * a;
 
 /**
@@ -502,9 +516,13 @@ class FnGen {
     return { locals: temps, temps };
   }
 
-  /** Make the leaves of `e` available in locals; struct locals are used in place. */
-  materialize(e) {
-    if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local') {
+  /**
+   * Make the leaves of `e` available in locals. A local variable is used in
+   * place, unless one of the `later` expressions (evaluated after `e`) could
+   * change it, in which case its current value is copied first.
+   */
+  materialize(e, later = []) {
+    if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local' && !later.some(mayMutate)) {
       return { locals: leafTypes(e.type).map((_, i) => e.sym.index + i), temps: [] };
     }
     this.expr(e);
@@ -863,7 +881,7 @@ class FnGen {
           return;
         }
         if (isStruct(e.left.type) || isStruct(e.right.type)) {
-          const A = this.materialize(e.left);
+          const A = this.materialize(e.left, [e.right]);
           const B = this.materialize(e.right);
           if (e.op === '==' || e.op === '!=') this.structEquals(e.op, e.left.type, A, B);
           else this.componentwise(e.op, e.left.type, e.right.type, A, B, e);
@@ -1051,7 +1069,7 @@ class FnGen {
       case 'print': {
         // Evaluate every argument before printing anything: an argument may
         // call a function that prints, and the host builds one line at a time.
-        const vals = e.args.map((a) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a)));
+        const vals = e.args.map((a, i) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a, e.args.slice(i + 1))));
         e.args.forEach((a, i) => {
           if (i) this.printText(' ');
           if (vals[i]) this.printLeaves(a.type, vals[i].locals);
