@@ -3,10 +3,12 @@
 
 export const I32 = 0x7f;
 export const F64 = 0x7c;
+export const V128 = 0x7b;
 export const VOID_BLOCK = 0x40;
 
-export const valType = (t) => (t === 'float' ? F64 : I32);
-export const valTypeName = (vt) => (vt === F64 ? 'f64' : 'i32');
+const VECTOR_TYPES = new Set(['f32x4', 'i32x4', 'boolx4', 'v128']);
+export const valType = (t) => (t === 'float' ? F64 : VECTOR_TYPES.has(t) ? V128 : I32);
+export const valTypeName = (vt) => (vt === F64 ? 'f64' : vt === V128 ? 'v128' : 'i32');
 
 const textEncoder = new TextEncoder();
 const f64Scratch = new DataView(new ArrayBuffer(8));
@@ -53,6 +55,15 @@ export class ByteWriter {
   f64(x) {
     f64Scratch.setFloat64(0, x, true);
     for (let i = 0; i < 8; i++) this.bytes.push(f64Scratch.getUint8(i));
+    return this;
+  }
+  /** A v128 constant: four f32 lanes (`float`) or four i32 lanes. */
+  v128(lanes, float) {
+    for (const x of lanes) {
+      if (float) f64Scratch.setFloat32(0, x, true);
+      else f64Scratch.setInt32(0, x, true);
+      for (let i = 0; i < 4; i++) this.bytes.push(f64Scratch.getUint8(i));
+    }
     return this;
   }
   name(s) {
@@ -149,8 +160,79 @@ export const OPS = {
   'f64.min': [0xa4],
   'f64.max': [0xa5],
   'f64.convert_i32_s': [0xb7],
+  'f32.demote_f64': [0xb6],
+  'f64.promote_f32': [0xbb],
   'i32.trunc_sat_f64_s': [0xfc, 0x02],
 };
+
+// SIMD (fixed-width 128-bit vectors): prefix 0xfd, then the opcode as a u32
+// LEB128, then any immediates. Only the f32x4/i32x4 subset Kiln uses.
+const simd = (op, imm) => {
+  const bytes = [0xfd];
+  let n = op;
+  do {
+    let b = n & 0x7f;
+    n >>>= 7;
+    if (n) b |= 0x80;
+    bytes.push(b);
+  } while (n);
+  return imm ? [...bytes, imm] : bytes;
+};
+Object.assign(OPS, {
+  'v128.load': simd(0x00, 'mem'),
+  'v128.store': simd(0x0b, 'mem'),
+  'v128.const': simd(0x0c, 'v128'),
+  'i32x4.splat': simd(0x11),
+  'f32x4.splat': simd(0x13),
+  'i32x4.extract_lane': simd(0x1b, 'lane'),
+  'i32x4.replace_lane': simd(0x1c, 'lane'),
+  'f32x4.extract_lane': simd(0x1f, 'lane'),
+  'f32x4.replace_lane': simd(0x20, 'lane'),
+  'i32x4.eq': simd(0x37),
+  'i32x4.ne': simd(0x38),
+  'i32x4.lt_s': simd(0x39),
+  'i32x4.gt_s': simd(0x3b),
+  'i32x4.le_s': simd(0x3d),
+  'i32x4.ge_s': simd(0x3f),
+  'f32x4.eq': simd(0x41),
+  'f32x4.ne': simd(0x42),
+  'f32x4.lt': simd(0x43),
+  'f32x4.gt': simd(0x44),
+  'f32x4.le': simd(0x45),
+  'f32x4.ge': simd(0x46),
+  'v128.not': simd(0x4d),
+  'v128.and': simd(0x4e),
+  'v128.or': simd(0x50),
+  'v128.xor': simd(0x51),
+  'v128.bitselect': simd(0x52),
+  'v128.any_true': simd(0x53),
+  'f32x4.ceil': simd(0x67),
+  'f32x4.floor': simd(0x68),
+  'f32x4.trunc': simd(0x69),
+  'f32x4.nearest': simd(0x6a),
+  'i32x4.abs': simd(0xa0),
+  'i32x4.neg': simd(0xa1),
+  'i32x4.all_true': simd(0xa3),
+  'i32x4.shl': simd(0xab),
+  'i32x4.shr_s': simd(0xac),
+  'i32x4.shr_u': simd(0xad),
+  'i32x4.add': simd(0xae),
+  'i32x4.sub': simd(0xb1),
+  'i32x4.mul': simd(0xb5),
+  'i32x4.min_s': simd(0xb6),
+  'i32x4.max_s': simd(0xb8),
+  'f32x4.abs': simd(0xe0),
+  'f32x4.neg': simd(0xe1),
+  'f32x4.sqrt': simd(0xe3),
+  'f32x4.add': simd(0xe4),
+  'f32x4.sub': simd(0xe5),
+  'f32x4.mul': simd(0xe6),
+  'f32x4.div': simd(0xe7),
+  'f32x4.min': simd(0xe8),
+  'f32x4.max': simd(0xe9),
+  'i32x4.trunc_sat_f32x4_s': simd(0xf8),
+  'f32x4.convert_i32x4_s': simd(0xfa),
+});
 
 /** WAT spelling of an f64 constant. */
 export function f64Text(x) {

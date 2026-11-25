@@ -12,7 +12,8 @@
 
 import { ByteWriter, OPS, SECTION, I32, F64, VOID_BLOCK, valType, valTypeName, f64Text } from './wasm.js';
 import { IMPORTS } from './builtins.js';
-import { isStruct, leafTypes, numericKind, sizeOf } from './types.js';
+import { isStruct, leafTypes, numericKind, sizeOf, alignOf, isVector, laneType } from './types.js';
+import { printImport, laneValue } from './checker.js';
 
 const textEncoder = new TextEncoder();
 
@@ -30,6 +31,19 @@ function mayMutate(e) {
   return m;
 }
 const align = (n, a) => Math.ceil(n / a) * a;
+
+/** What kind of wasm local holds a leaf: 'float' (f64), 'v128' or 'int' (i32). */
+const localKind = (t) => (t === 'float' ? 'float' : isVector(t) || t === 'v128' ? 'v128' : 'int');
+const TEMP_POOL = { float: 'f64', v128: 'v128', int: 'i32' };
+const SHIFTS = new Set(['<<', '>>', '>>>']);
+
+/** A vector constant's lanes as the bits wasm stores: bool lanes are -1 or 0. */
+const vectorBits = (V, lanes) => (V === 'boolx4' ? lanes.map((b) => (b ? -1 : 0)) : lanes);
+
+function v128Text(V, lanes) {
+  const bits = vectorBits(V, lanes);
+  return V === 'f32x4' ? `f32x4 ${bits.map(f64Text).join(' ')}` : `i32x4 ${bits.join(' ')}`;
+}
 
 /**
  * What a function leaves on the stack when it returns: its return value's
@@ -115,7 +129,7 @@ class Generator {
     let addr = 8;
     const inits = [];
     for (const a of this.arrays) {
-      a.addr = align(addr, 8);
+      a.addr = align(addr, Math.max(8, alignOf(a.elem)));
       addr = a.addr + a.size * sizeOf(a.elem);
       if (a.init && a.init.length) inits.push(a);
     }
@@ -221,6 +235,7 @@ class Generator {
         w.vec(allGlobals, (g) => {
           w.u8(valType(g.type)).u8(g.mutable ? 1 : 0);
           if (g.type === 'float') w.u8(0x44).f64(g.value);
+          else if (isVector(g.type)) w.raw(OPS['v128.const'].slice(0, -1)).v128(g.value, g.type === 'f32x4');
           else w.u8(0x41).s32(g.value);
           w.u8(0x0b);
         }),
@@ -309,6 +324,7 @@ class Generator {
   /** The i32/f64 a scalar constant becomes. */
   leafValue(type, v) {
     if (type === 'float') return v;
+    if (isVector(type)) return vectorBits(type, v);
     if (type === 'str') return this.intern(v);
     return typeof v === 'boolean' ? +v : v;
   }
@@ -325,6 +341,8 @@ class Generator {
         const off = i * size + offsets[j];
         const x = this.leafValue(t, vals[j]);
         if (t === 'float') view.setFloat64(off, x, true);
+        else if (t === 'f32x4') x.forEach((lane, k) => view.setFloat32(off + 4 * k, lane, true));
+        else if (isVector(t)) x.forEach((lane, k) => view.setInt32(off + 4 * k, lane, true));
         else view.setInt32(off, x, true);
       });
     });
@@ -361,7 +379,7 @@ class Generator {
     }
     out.push(`  (memory (export "memory") ${pages})`);
     for (const g of globals) {
-      const init = g.type === 'float' ? `f64.const ${f64Text(g.value)}` : `i32.const ${g.value}`;
+      const init = g.type === 'float' ? `f64.const ${f64Text(g.value)}` : isVector(g.type) ? `v128.const ${v128Text(g.type, g.value)}` : `i32.const ${g.value}`;
       const ty = g.mutable ? `(mut ${vt(g.type)})` : vt(g.type);
       const ex = g.name === '__screen' ? ` (export "__screen")` : '';
       out.push(`  (global $${g.name}${ex} ${ty} (${init}))`);
@@ -405,9 +423,9 @@ class FnGen {
     this.depth = 0;
     this.labels = [];
     this.loops = [];
-    this.localTypes = sym.locals.map((l) => (l.type === 'float' ? 'float' : 'int'));
+    this.localTypes = sym.locals.map((l) => localKind(l.type));
     this.localNames = uniqueNames(sym.locals.map((l) => l.name));
-    this.free = { i32: [], f64: [] };
+    this.free = { i32: [], f64: [], v128: [] };
     this.src = gen.sources[sym.origin] ?? [];
     this.lastLine = -1;
     // While a call is being inlined: the callee's parameter symbols mapped to
@@ -517,6 +535,16 @@ class FnGen {
           this.code.f64(args[0]);
           text += ` ${f64Text(args[0])}`;
           break;
+        case 'lane':
+          this.code.u8(args[0]);
+          text += ` ${args[0]}`;
+          break;
+        case 'v128': {
+          const [V, lanes] = args;
+          this.code.v128(vectorBits(V, lanes), V === 'f32x4');
+          text += ` ${v128Text(V, lanes)}`;
+          break;
+        }
       }
     }
     this.lines.push('    ' + '  '.repeat(this.depth) + text);
@@ -561,15 +589,16 @@ class FnGen {
   }
 
   temp(type) {
-    const kind = type === 'float' ? 'f64' : 'i32';
-    if (this.free[kind].length) return this.free[kind].pop();
+    const kind = localKind(type);
+    const pool = this.free[TEMP_POOL[kind]];
+    if (pool.length) return pool.pop();
     const idx = this.localTypes.length;
-    this.localTypes.push(type === 'float' ? 'float' : 'int');
+    this.localTypes.push(kind);
     this.localNames.push(`t.${idx}`);
     return idx;
   }
   release(...idxs) {
-    for (const idx of idxs) this.free[this.localTypes[idx] === 'float' ? 'f64' : 'i32'].push(idx);
+    for (const idx of idxs) this.free[TEMP_POOL[this.localTypes[idx]]].push(idx);
   }
 
   /** Pop a value of `type` off the stack into fresh temps (one per leaf). */
@@ -615,12 +644,102 @@ class FnGen {
 
   load(type, offset) {
     if (type === 'float') this.emit('f64.load', 3, offset);
+    else if (isVector(type)) this.emit('v128.load', 4, offset);
     else this.emit('i32.load', 2, offset);
   }
 
   store(type, offset) {
     if (type === 'float') this.emit('f64.store', 3, offset);
+    else if (isVector(type)) this.emit('v128.store', 4, offset);
     else this.emit('i32.store', 2, offset);
+  }
+
+  // ----------------------------------------------------------------- lanes
+
+  /** Push scalar `e` into all four lanes; a constant becomes one v128.const. */
+  pushSplat(e, V) {
+    if (e.constValue !== undefined) {
+      const c = laneValue(V, e.constValue);
+      this.emit('v128.const', V, [c, c, c, c]);
+      return;
+    }
+    this.expr(e);
+    this.splat(V);
+  }
+
+  /** Stack: [scalar] -> [vector with the scalar in all four lanes]. */
+  splat(V) {
+    if (V === 'f32x4') {
+      this.emit('f32.demote_f64');
+      this.emit('f32x4.splat');
+    } else {
+      this.emit('i32x4.splat');
+      if (V === 'boolx4') this.emit('i32x4.neg'); // true is 1 as a bool, all ones as a lane
+    }
+  }
+
+  /** Stack: [vector] -> [lane as a Kiln scalar]. */
+  extractLane(V, lane) {
+    if (V === 'f32x4') {
+      this.emit('f32x4.extract_lane', lane);
+      this.emit('f64.promote_f32');
+    } else {
+      this.emit('i32x4.extract_lane', lane);
+      if (V === 'boolx4') {
+        this.emit('i32.const', 1);
+        this.emit('i32.and');
+      }
+    }
+  }
+
+  /** Stack: [vector, scalar] -> [vector with that lane replaced]. */
+  replaceLane(V, lane) {
+    if (V === 'f32x4') {
+      this.emit('f32.demote_f64');
+      this.emit('f32x4.replace_lane', lane);
+    } else {
+      if (V === 'boolx4') {
+        this.emit('i32.const', -1);
+        this.emit('i32.mul');
+      }
+      this.emit('i32x4.replace_lane', lane);
+    }
+  }
+
+  /** Lane-wise operator on two vectors on the stack (a shift takes an int count instead). */
+  vecop(op, V, node) {
+    if (V === 'f32x4') {
+      if (op === '%') {
+        // like float %: a - trunc(a / b) * b
+        const a = this.temp('v128');
+        const b = this.temp('v128');
+        this.emit('local.set', b);
+        this.emit('local.tee', a);
+        this.emit('local.get', a);
+        this.emit('local.get', b);
+        this.emit('f32x4.div');
+        this.emit('f32x4.trunc');
+        this.emit('local.get', b);
+        this.emit('f32x4.mul');
+        this.emit('f32x4.sub');
+        this.release(a, b);
+        return;
+      }
+      const F = { '+': 'add', '-': 'sub', '*': 'mul', '/': 'div', '==': 'eq', '!=': 'ne', '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge' };
+      this.emit('f32x4.' + F[op]);
+      return;
+    }
+    const BITS = { '&': 'v128.and', '|': 'v128.or', '^': 'v128.xor' };
+    if (op in BITS) {
+      this.emit(BITS[op]);
+      return;
+    }
+    const I = {
+      '+': 'add', '-': 'sub', '*': 'mul', '<<': 'shl', '>>': 'shr_s', '>>>': 'shr_u',
+      '==': 'eq', '!=': 'ne', '<': 'lt_s', '<=': 'le_s', '>': 'gt_s', '>=': 'ge_s',
+    };
+    if (!(op in I)) throw new Error(`codegen: no ${op} for ${V} (line ${node?.span?.line})`);
+    this.emit('i32x4.' + I[op]);
   }
 
   globalLeaf(sym, i) {
@@ -644,6 +763,7 @@ class FnGen {
       case 'Field': {
         const p = this.place(e.target);
         if (!p) return null;
+        if (e.lane !== undefined) return { kind: 'lane', base: p, lane: e.lane, vec: e.target.type, type: e.type, temps: p.temps };
         const S = e.target.type;
         const i = e.fieldIndex;
         const type = S.fields[i].type;
@@ -677,6 +797,11 @@ class FnGen {
   }
 
   loadPlace(p) {
+    if (p.kind === 'lane') {
+      this.loadPlace(p.base);
+      this.extractLane(p.vec, p.lane);
+      return;
+    }
     leafTypes(p.type).forEach((t, i) => {
       if (p.kind === 'local') this.emit('local.get', p.idx[i]);
       else if (p.kind === 'global') this.emit('global.get', this.globalLeaf(p.sym, p.leaf + i));
@@ -689,6 +814,17 @@ class FnGen {
 
   /** Store the value on top of the stack into the place. */
   storePlace(p) {
+    if (p.kind === 'lane') {
+      // read the whole vector, replace one lane, write it back
+      const v = this.temp(p.type);
+      this.emit('local.set', v);
+      this.loadPlace(p.base);
+      this.emit('local.get', v);
+      this.replaceLane(p.vec, p.lane);
+      this.storePlace(p.base);
+      this.release(v);
+      return;
+    }
     const ls = leafTypes(p.type);
     if (p.kind === 'local') {
       for (let i = ls.length - 1; i >= 0; i--) this.emit('local.set', p.idx[i]);
@@ -834,7 +970,7 @@ class FnGen {
         this.expr(s.value);
         // A user operator can take a scalar and a struct and return a scalar.
         if (s.opMethod) this.emit('call', s.opMethod.sym);
-        else this.binop(s.op, type, s);
+        else this.binopStack(s.op, type, s.value.type, s);
       } else {
         this.expr(s.value);
       }
@@ -858,6 +994,7 @@ class FnGen {
 
   zero(type) {
     if (type === 'float') this.emit('f64.const', 0);
+    else if (isVector(type)) this.emit('v128.const', type, [0, 0, 0, 0]);
     else this.emit('i32.const', 0);
   }
 
@@ -867,6 +1004,7 @@ class FnGen {
       return;
     }
     if (type === 'float') this.emit('f64.const', v);
+    else if (isVector(type)) this.emit('v128.const', type, v);
     else this.emit('i32.const', this.gen.leafValue(type, v));
   }
 
@@ -911,6 +1049,12 @@ class FnGen {
           this.release(...p.temps);
           return;
         }
+        if (e.lane !== undefined) {
+          // lane of a temporary vector, e.g. (a + b).x
+          this.expr(e.target);
+          this.extractLane(e.target.type, e.lane);
+          return;
+        }
         // Field of a temporary (e.g. f().x): evaluate it all, keep the part we need.
         const v = this.materialize(e.target);
         const S = e.target.type;
@@ -928,6 +1072,9 @@ class FnGen {
           const v = this.materialize(e.operand);
           for (const [i, t] of e.type.leafTypes.entries()) this.negate(t, () => this.emit('local.get', v.locals[i]));
           this.release(...v.temps);
+        } else if (isVector(e.type) && e.op !== '-') {
+          this.expr(e.operand);
+          this.emit('v128.not'); // '!' on a mask, '~' on an i32x4
         } else if (e.op === '-') {
           this.negate(e.type, () => this.expr(e.operand));
         } else if (e.op === '!') {
@@ -965,6 +1112,15 @@ class FnGen {
           if (e.op === '==' || e.op === '!=') this.structEquals(e.op, e.left.type, A, B);
           else this.componentwise(e.op, e.left.type, e.right.type, A, B, e);
           this.release(...A.temps, ...B.temps);
+          return;
+        }
+        if (isVector(e.left.type) || isVector(e.right.type)) {
+          const V = isVector(e.left.type) ? e.left.type : e.right.type;
+          for (const side of ['left', 'right']) {
+            if (e.splatSide === side) this.pushSplat(e[side], V);
+            else this.expr(e[side]);
+          }
+          this.vecop(e.op, V, e);
           return;
         }
         this.expr(e.left);
@@ -1082,6 +1238,9 @@ class FnGen {
     if (type === 'float') {
       push();
       this.emit('f64.neg');
+    } else if (isVector(type)) {
+      push();
+      this.emit(type === 'f32x4' ? 'f32x4.neg' : 'i32x4.neg');
     } else {
       this.emit('i32.const', 0);
       push();
@@ -1093,18 +1252,36 @@ class FnGen {
   componentwise(op, lt, rt, A, B, node) {
     const S = isStruct(lt) ? lt : rt;
     const kind = numericKind(S);
-    for (let i = 0; i < S.leafTypes.length; i++) {
-      this.emit('local.get', A.locals[isStruct(lt) ? i : 0]);
-      this.emit('local.get', B.locals[isStruct(rt) ? i : 0]);
-      this.binop(op, kind, node);
+    let splatted = null;
+    if (isVector(kind) && !isStruct(lt) !== !isStruct(rt)) {
+      // a lane scalar next to a struct of vectors: fill a vector with it once
+      const [st, X] = isStruct(lt) ? [rt, B] : [lt, A];
+      if (st !== kind) {
+        splatted = this.temp(kind);
+        this.emit('local.get', X.locals[0]);
+        this.splat(kind);
+        this.emit('local.set', splatted);
+      }
     }
+    for (let i = 0; i < S.leafTypes.length; i++) {
+      this.emit('local.get', isStruct(lt) ? A.locals[i] : splatted ?? A.locals[0]);
+      this.emit('local.get', isStruct(rt) ? B.locals[i] : splatted ?? B.locals[0]);
+      if (isVector(kind)) this.vecop(op, kind, node);
+      else this.binop(op, kind, node);
+    }
+    if (splatted !== null) this.release(splatted);
   }
 
   structEquals(op, S, A, B) {
     S.leafTypes.forEach((t, i) => {
       this.emit('local.get', A.locals[i]);
       this.emit('local.get', B.locals[i]);
-      this.emit(t === 'float' ? 'f64.eq' : 'i32.eq');
+      if (isVector(t)) {
+        this.emit(t === 'f32x4' ? 'f32x4.eq' : 'i32x4.eq');
+        this.emit('i32x4.all_true');
+      } else {
+        this.emit(t === 'float' ? 'f64.eq' : 'i32.eq');
+      }
       if (i > 0) this.emit('i32.and');
     });
     if (op === '!=') this.emit('i32.eqz');
@@ -1112,6 +1289,10 @@ class FnGen {
 
   /** Binary operator on two values already on the stack (used by compound assignment). */
   binopStack(op, lt, rt, node) {
+    if (isVector(lt)) {
+      if (!isVector(rt) && !SHIFTS.has(op)) this.splat(lt);
+      return this.vecop(op, lt, node);
+    }
     if (!isStruct(lt) && !isStruct(rt)) return this.binop(op, lt, node);
     const B = this.spill(rt);
     const A = this.spill(lt);
@@ -1161,6 +1342,16 @@ class FnGen {
 
   convert(from, to) {
     if (from === to) return;
+    if (isVector(to)) {
+      if (from === 'boolx4') this.emit('i32x4.neg'); // all ones -> 1
+      if (to === 'f32x4') this.emit('f32x4.convert_i32x4_s');
+      else if (to === 'i32x4' && from === 'f32x4') this.emit('i32x4.trunc_sat_f32x4_s');
+      else if (to === 'boolx4') {
+        this.emit('v128.const', from, [0, 0, 0, 0]);
+        this.emit(from === 'f32x4' ? 'f32x4.ne' : 'i32x4.ne');
+      }
+      return;
+    }
     if (to === 'float') this.emit('f64.convert_i32_s');
     else if (to === 'int') {
       if (from === 'float') this.emit('i32.trunc_sat_f64_s');
@@ -1191,6 +1382,15 @@ class FnGen {
   }
 
   call(e) {
+    if (e.vecCtor) {
+      const V = e.vecCtor;
+      this.pushSplat(e.args[0], V);
+      for (let i = 1; i < e.args.length; i++) {
+        this.expr(e.args[i]);
+        this.replaceLane(V, i);
+      }
+      return;
+    }
     if (e.ctor) {
       // A struct value *is* its fields' leaves, in order: construction is free.
       for (const a of e.args) this.expr(a);
@@ -1204,25 +1404,38 @@ class FnGen {
       case 'print': {
         // Evaluate every argument before printing anything: an argument may
         // call a function that prints, and the host builds one line at a time.
-        const vals = e.args.map((a, i) => (a.constValue !== undefined && !isStruct(a.type) ? null : this.materialize(a, e.args.slice(i + 1))));
+        const vals = e.args.map((a, i) => (a.constValue !== undefined && !isStruct(a.type) && !isVector(a.type) ? null : this.materialize(a, e.args.slice(i + 1))));
         e.args.forEach((a, i) => {
           if (i) this.printText(' ');
           if (vals[i]) this.printLeaves(a.type, vals[i].locals);
           else {
             this.expr(a);
-            this.callImport(`__print_${a.type[0]}`);
+            this.callImport(printImport(a.type));
           }
         });
         this.callImport('__print_end');
         for (const v of vals) if (v) this.release(...v.temps);
         return;
       }
-      case 'select':
+      case 'select': {
+        if (e.vecSelect) {
+          // Lane by lane: (a & mask) | (b & ~mask). The mask is evaluated first.
+          const m = this.materialize(e.args[0], e.args.slice(1));
+          e.args.slice(1).forEach((a, i) => {
+            if (e.splatArgs[i]) this.pushSplat(a, e.vecSelect);
+            else this.expr(a);
+          });
+          this.emit('local.get', m.locals[0]);
+          this.emit('v128.bitselect');
+          this.release(...m.temps);
+          return;
+        }
         this.expr(e.args[1]);
         this.expr(e.args[2]);
         this.expr(e.args[0]);
         this.emit('select');
         return;
+      }
       case 'len':
         this.expr(e.args[0]);
         this.emit('i32.load', 2, 0);
@@ -1266,6 +1479,8 @@ class FnGen {
   printLeaves(type, locals) {
     if (isStruct(type)) {
       this.printStruct(type, locals, 0);
+    } else if (isVector(type)) {
+      this.printVector(type, locals[0]);
     } else {
       this.emit('local.get', locals[0]);
       this.callImport(`__print_${type[0]}`);
@@ -1281,6 +1496,8 @@ class FnGen {
       if (isStruct(f.type)) {
         this.printStruct(f.type, locals, k);
         k += f.type.leafTypes.length;
+      } else if (isVector(f.type)) {
+        this.printVector(f.type, locals[k++]);
       } else {
         this.emit('local.get', locals[k++]);
         this.callImport(`__print_${f.type[0]}`);
@@ -1289,8 +1506,52 @@ class FnGen {
     this.printText(')');
   }
 
+  /** Prints like the constructor: f32x4(1.0, 2.5, 3.0, 4.0) */
+  printVector(V, local) {
+    this.printText(`${V}(`);
+    for (let i = 0; i < 4; i++) {
+      if (i) this.printText(', ');
+      this.emit('local.get', local);
+      this.extractLane(V, i);
+      this.callImport(printImport(V));
+    }
+    this.printText(')');
+  }
+
+  /** Lane-wise intrinsics; a scalar argument fills all four lanes. */
+  vectorIntrinsic(e) {
+    const name = e.callee;
+    const [params, V] = e.overload;
+    if (name === 'any' || name === 'all') {
+      this.expr(e.args[0]);
+      this.emit(name === 'any' ? 'v128.any_true' : 'i32x4.all_true');
+      return;
+    }
+    const isInt = V === 'i32x4';
+    const arg = (i) => {
+      if (!isVector(params[i])) this.pushSplat(e.args[i], V);
+      else this.expr(e.args[i]);
+    };
+    const unary = { sqrt: 'f32x4.sqrt', floor: 'f32x4.floor', ceil: 'f32x4.ceil', trunc: 'f32x4.trunc', round: 'f32x4.nearest' };
+    const min = isInt ? 'i32x4.min_s' : 'f32x4.min';
+    const max = isInt ? 'i32x4.max_s' : 'f32x4.max';
+    arg(0);
+    if (name in unary) this.emit(unary[name]);
+    else if (name === 'abs') this.emit(isInt ? 'i32x4.abs' : 'f32x4.abs');
+    else if (name === 'min' || name === 'max') {
+      arg(1);
+      this.emit(name === 'min' ? min : max);
+    } else if (name === 'clamp') {
+      arg(1);
+      this.emit(max);
+      arg(2);
+      this.emit(min);
+    } else throw new Error(`codegen: unknown vector intrinsic ${name}`);
+  }
+
   intrinsic(e) {
     const name = e.callee;
+    if (isVector(e.overload[0][0])) return this.vectorIntrinsic(e);
     const isInt = e.overload[1] === 'int';
     const [a, b, c] = e.args;
     const unary = { sqrt: 'f64.sqrt', floor: 'f64.floor', ceil: 'f64.ceil', trunc: 'f64.trunc', round: 'f64.nearest' };

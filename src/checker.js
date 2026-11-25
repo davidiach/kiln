@@ -9,7 +9,7 @@
 
 import { CompileError, suggest } from './errors.js';
 import { INTRINSICS, IMPORTS, SPECIAL, FOLDABLE, nearest, isBuiltinName, signatureText } from './builtins.js';
-import { isStruct, leafTypes, leafCount, numericKind, layoutStruct } from './types.js';
+import { isStruct, leafTypes, leafCount, numericKind, layoutStruct, sizeOf, isVector, laneType, vectorOf, VECTORS, LANE_NAMES } from './types.js';
 
 const SCALARS = ['int', 'float', 'bool', 'str'];
 const ARITH = new Set(['+', '-', '*', '/', '%']);
@@ -98,6 +98,10 @@ class Checker {
     }
     const name = item.name;
     const span = item.nameSpan ?? item.span;
+    if (isVector(name)) {
+      this.err(`'${name}' is a built-in type and can't be redefined`, span, 'pick a different name');
+      return;
+    }
     if (isBuiltinName(name)) {
       this.err(`'${name}' is a built-in function and can't be redefined`, span, 'pick a different name');
       return;
@@ -148,10 +152,10 @@ class Checker {
       else this.err('array types are only allowed for top-level variables', node.span, 'declare the array outside of any function');
       return 'error';
     }
-    if (SCALARS.includes(node.name)) return node.name;
+    if (SCALARS.includes(node.name) || isVector(node.name)) return node.name;
     const sym = this.top.get(node.name);
     if (sym && sym.kind === 'struct') return this.resolveStruct(sym) ? sym : 'error';
-    const names = [...SCALARS, ...this.structs.map((s) => s.name)];
+    const names = [...SCALARS, ...VECTORS, ...this.structs.map((s) => s.name)];
     const s = suggest(node.name, names);
     this.err(`unknown type '${node.name}'`, node.span, s ? `did you mean '${s}'?` : `types are: ${names.join(', ')}`);
     return 'error';
@@ -312,6 +316,10 @@ class Checker {
       f.params.push({ name: p.name, type: this.valueType(p.type) });
     }
     f.ret = f.decl.ret ? this.valueType(f.decl.ret) : 'void';
+    if (f.exported && [...f.params.map((p) => p.type), f.ret].some((t) => leafTypes(t === 'error' ? 'void' : t).some(isVector))) {
+      this.err(`exported function '${f.name}' can't take or return SIMD vectors`, f.decl.nameSpan ?? f.decl.span,
+        "JavaScript has no v128 values; pass the lanes as separate floats or ints instead");
+    }
   }
 
   inConstContext(origin, f) {
@@ -449,7 +457,7 @@ class Checker {
         else if (els.length > size) this.err(`array '${sym.name}' has room for ${size} elements but ${els.length} were given`, d.init.span);
       }
       if (elem === 'error' || elem === null || size === null) return;
-      const bytes = size * (isStruct(elem) ? elem.size : elem === 'float' ? 8 : 4);
+      const bytes = size * sizeOf(elem);
       if (bytes > MAX_MEMORY) {
         this.err(`array '${sym.name}' is too large (${bytes} bytes; the limit is ${MAX_MEMORY})`, d.span);
         return;
@@ -544,7 +552,12 @@ class Checker {
   cond(e, what) {
     const t = this.expr(e);
     if (t !== 'bool' && t !== 'error') {
-      const hint = t === 'int' ? 'compare explicitly, e.g. x != 0' : undefined;
+      let hint = t === 'int' ? 'compare explicitly, e.g. x != 0' : undefined;
+      if (t === 'boolx4') {
+        hint = what === 'conditional'
+          ? 'a vector comparison gives one bool per lane; choose lane by lane with select(mask, a, b)'
+          : 'a vector comparison gives one bool per lane; test them with any(mask) or all(mask)';
+      }
       this.err(`${what} condition must be a bool, found ${t}`, e.span, hint);
     }
   }
@@ -666,6 +679,7 @@ class Checker {
       }
       s.checkZero = fake.checkZero;
       s.opMethod = fake.opMethod;
+      s.splatSide = fake.splatSide;
     }
   }
 
@@ -772,6 +786,12 @@ class Checker {
       case 'Unary': {
         const t = this.expr(e.operand);
         if (t === 'error') return t;
+        if (isVector(t)) {
+          if ((e.op === '-' && t !== 'boolx4') || (e.op === '!' && t === 'boolx4') || (e.op === '~' && t === 'i32x4')) return t;
+          const hint = e.op === '!' ? "'!' flips the lanes of a boolx4 mask" : e.op === '~' ? "'~' works on i32x4" : undefined;
+          this.err(`can't apply '${e.op}' to ${t}`, e.span, hint);
+          return 'error';
+        }
         if (e.op === '-' && isStruct(t)) {
           const neg = t.operators.find((o) => o.op === '-' && o.unary && !o.bad);
           if (neg) {
@@ -800,6 +820,14 @@ class Checker {
         const from = this.expr(e.expr);
         const to = this.valueType(e.to);
         if (from === 'error' || to === 'error') return 'error';
+        if (isVector(from) || isVector(to)) {
+          if (isVector(from) && isVector(to)) return to;
+          let hint;
+          if (isVector(to) && from === laneType(to)) hint = `put it in all four lanes with ${to}(x), or build one from four values`;
+          else if (isVector(from) && to === laneType(from)) hint = 'read one lane with v.x, v.y, v.z or v.w';
+          this.err(`can't convert ${from} to ${to}`, e.span, hint);
+          return 'error';
+        }
         if (from === 'str' || to === 'str' || from === 'void' || isStruct(from) || isStruct(to)) {
           this.err(`can't convert ${from} to ${to}`, e.span);
           return 'error';
@@ -825,6 +853,15 @@ class Checker {
       case 'Field': {
         const t = this.expr(e.target);
         if (t === 'error') return t;
+        if (isVector(t)) {
+          const lane = LANE_NAMES.indexOf(e.name);
+          if (lane < 0) {
+            this.err(`${t} has no lane '${e.name}'`, e.nameSpan, 'its lanes are x, y, z and w');
+            return 'error';
+          }
+          e.lane = lane;
+          return laneType(t);
+        }
         if (!isStruct(t)) {
           this.err(`${t} values don't have fields`, e.nameSpan);
           return 'error';
@@ -859,6 +896,10 @@ class Checker {
         }
         const t = this.expr(e.target);
         if (t === 'error') return t;
+        if (isVector(t)) {
+          this.err(`can't index into ${article(t)}`, e.target.span, 'read a lane with v.x, v.y, v.z or v.w');
+          return 'error';
+        }
         if (t === 'str') {
           e.indexKind = 'str';
           if (this.fn) this.fn.imports.add('__trap');
@@ -894,6 +935,7 @@ class Checker {
       }
       return this.structBinary(e, lt, rt, bad);
     }
+    if (isVector(lt) || isVector(rt)) return this.vectorBinary(e, lt, rt, bad);
     if (op === '&&' || op === '||') {
       if (lt === 'bool' && rt === 'bool') return 'bool';
       return bad(`'${op}' works on bools; compare ints explicitly, e.g. x != 0`);
@@ -938,6 +980,40 @@ class Checker {
     throw new Error(`unknown operator ${op}`);
   }
 
+  // Vectors work lane by lane, with another vector of the same type or with a
+  // scalar of the lane type, which fills all four lanes (e.splatSide).
+  vectorBinary(e, lt, rt, bad) {
+    const op = e.op;
+    const V = isVector(lt) ? lt : rt;
+    const lane = laneType(V);
+    if (SHIFT.has(op)) {
+      if (lt !== 'i32x4') return bad(V === 'i32x4' ? undefined : 'shifts work on i32x4');
+      if (rt !== 'int') return bad(isVector(rt) ? 'every lane is shifted by the same amount, so the right side must be an int' : undefined);
+      return V;
+    }
+    for (const [side, t] of [['left', lt], ['right', rt]]) {
+      if (t === V) continue;
+      if (isVector(t)) return bad(`both sides must be the same kind of vector; convert with 'as ${V}'`);
+      if (t !== lane) {
+        if (lane === 'float' && t === 'int' && this.coercible(e[side])) this.toFloat(e[side]);
+        else return bad(`${article(V)} can be combined with another ${V} or with ${article(lane)} (which fills all four lanes), not ${article(t)}`);
+      }
+      e.splatSide = side;
+    }
+    if (op === '&&' || op === '||') return bad(V === 'boolx4' ? `use '${op[0]}' to combine masks lane by lane` : undefined);
+    if (ARITH.has(op)) {
+      if (V === 'boolx4') return bad();
+      if (V === 'i32x4' && (op === '/' || op === '%')) {
+        return bad("WebAssembly SIMD can't divide integer lanes; convert with 'as f32x4' first, or divide one lane at a time");
+      }
+      return V;
+    }
+    if (COMPARE.has(op)) return V === 'boolx4' ? bad() : 'boolx4';
+    if (EQUALITY.has(op)) return 'boolx4';
+    if (BITWISE.has(op)) return V === 'f32x4' ? bad(`'${op}' works on i32x4 and boolx4`) : V;
+    throw new Error(`unknown operator ${op}`);
+  }
+
   // Structs whose leaves are all floats (or all ints) get component-wise
   // arithmetic, with another value of the same struct or with a scalar.
   structBinary(e, lt, rt, bad) {
@@ -952,10 +1028,14 @@ class Checker {
       if (lt !== rt) return bad();
     } else {
       const [scalar, st] = isStruct(lt) ? [e.right, rt] : [e.left, lt];
+      const lane = isVector(kind) ? laneType(kind) : null;
       if (st !== kind) {
-        if (kind === 'float' && st === 'int' && this.coercible(scalar)) this.toFloat(scalar);
-        else return bad(`${article(S)} can be combined with ${article(kind)}, not ${article(st)}`);
+        if ((kind === 'float' || lane === 'float') && st === 'int' && this.coercible(scalar)) this.toFloat(scalar);
+        else if (st !== lane) return bad(`${article(S)} can be combined with ${article(kind)}${lane ? ` or ${article(lane)}` : ''}, not ${article(st)}`);
       }
+    }
+    if (kind === 'i32x4' && (op === '/' || op === '%')) {
+      return bad("WebAssembly SIMD can't divide integer lanes; convert the fields with 'as f32x4' first");
     }
     if (kind === 'int' && (op === '/' || op === '%')) {
       e.checkZero = true;
@@ -1043,6 +1123,7 @@ class Checker {
       this.err(`'${name}' is a variable, not a function`, e.calleeSpan);
       return 'error';
     }
+    if (isVector(name)) return this.vectorCtor(e, name);
     const sym = this.top.get(name);
     if (sym && sym.kind === 'struct') {
       this.checkArgs(e, sym.fields.map((f) => f.type), signatureText(name, sym.fields.map((f) => `${f.name}: ${f.type}`), name));
@@ -1089,6 +1170,21 @@ class Checker {
     const s = suggest(name, [...this.top.keys(), ...Object.keys(INTRINSICS), ...SPECIAL, ...Object.keys(IMPORTS)]);
     this.err(`unknown function '${name}'`, e.calleeSpan, s ? `did you mean '${s}'?` : undefined);
     return 'error';
+  }
+
+  /** f32x4(a, b, c, d) builds a vector from four lanes; f32x4(a) puts a in all four. */
+  vectorCtor(e, V) {
+    const lane = laneType(V);
+    const types = e.args.map((a) => this.expr(a));
+    const n = e.args.length;
+    if (n !== 1 && n !== 4) {
+      const ex = { f32x4: '1.0, 2.0, 3.0, 4.0', i32x4: '1, 2, 3, 4', boolx4: 'true, false, true, false' }[V];
+      this.err(`'${V}' takes 1 value (for all four lanes) or 4 values (one per lane), but ${n} ${n === 1 ? 'was' : 'were'} given`, e.span, `e.g. ${V}(${ex})`);
+      return 'error';
+    }
+    e.args.forEach((a, i) => this.coerce(a, types[i], lane, n === 1 ? `the value of '${V}'` : `lane ${LANE_NAMES[i]} of '${V}'`));
+    e.vecCtor = V;
+    return V;
   }
 
   methodSignature(m) {
@@ -1183,8 +1279,8 @@ class Checker {
       const t = this.expr(a);
       if (t === 'void') this.err(`can't print something that has no value`, a.span);
       else if (t !== 'error') {
-        for (const lt of leafTypes(t)) this.fn.imports.add(`__print_${lt[0]}`);
-        if (isStruct(t)) this.fn.imports.add('__print_s');
+        for (const lt of leafTypes(t)) this.fn.imports.add(printImport(lt));
+        if (isStruct(t) || isVector(t)) this.fn.imports.add('__print_s');
       }
     }
     if (e.args.length > 1) this.fn.imports.add('__print_s');
@@ -1199,10 +1295,18 @@ class Checker {
       this.err(`'select' takes 3 arguments (cond, a, b) but ${e.args.length} were given`, e.span);
       return 'error';
     }
-    this.cond(e.args[0], 'select');
+    const ct = this.expr(e.args[0]);
+    if (ct === 'boolx4') return this.vectorSelect(e);
+    if (ct !== 'bool' && ct !== 'error') {
+      this.err(`select condition must be a bool (or a boolx4 mask), found ${ct}`, e.args[0].span);
+    }
     const a = this.expr(e.args[1]);
     const b = this.expr(e.args[2]);
     if (a === 'error' || b === 'error') return 'error';
+    if (isVector(a) || isVector(b)) {
+      this.err(`'select' with vectors needs a boolx4 mask to choose lane by lane, found ${ct}`, e.args[0].span, 'compare vectors to get one, e.g. select(v < 0.0, -v, v)');
+      return 'error';
+    }
     const t = this.unify(e.args[1], a, e.args[2], b);
     if (!t || t === 'void') {
       this.err(`both values given to 'select' must have the same type, found ${a} and ${b}`, e.span);
@@ -1214,6 +1318,38 @@ class Checker {
     }
     e.builtin = 'select';
     return t;
+  }
+
+  /** select(mask, a, b): lane i comes from a where mask lane i is true, else from b. */
+  vectorSelect(e) {
+    const [, A, B] = e.args;
+    const a = this.expr(A);
+    const b = this.expr(B);
+    if (a === 'error' || b === 'error') return 'error';
+    let V = isVector(a) ? a : isVector(b) ? b : null;
+    if (!V) {
+      const t = this.unify(A, a, B, b);
+      V = t ? vectorOf(t) : null;
+    }
+    e.splatArgs = [false, false];
+    for (const [i, node] of [[0, A], [1, B]]) {
+      const t = node.type; // unify() may have turned an int literal into a float
+      if (V && t === V) continue;
+      if (V && t === laneType(V)) {
+        e.splatArgs[i] = true;
+        continue;
+      }
+      if (V === 'f32x4' && t === 'int' && this.coercible(node)) {
+        this.toFloat(node);
+        e.splatArgs[i] = true;
+        continue;
+      }
+      this.err(`both values given to 'select' must be the same vector type (or one of its lanes), found ${a} and ${b}`, e.span);
+      return 'error';
+    }
+    e.builtin = 'select';
+    e.vecSelect = V;
+    return V;
   }
 
   lenCall(e) {
@@ -1272,6 +1408,10 @@ class Checker {
         return;
       case 'Field': {
         const v = e.target.constValue;
+        if (v !== undefined && e.lane !== undefined) {
+          e.constValue = v[e.lane];
+          return;
+        }
         if (v === undefined || e.fieldIndex === undefined) return;
         const start = e.target.type.fieldLeaf[e.fieldIndex];
         e.constValue = isStruct(e.type) ? v.slice(start, start + leafCount(e.type)) : v[start];
@@ -1280,8 +1420,9 @@ class Checker {
       case 'Unary': {
         const v = e.operand.constValue;
         if (v === undefined || e.opMethod) return;
-        if (isStruct(e.type)) e.constValue = v.map((x) => (numericKind(e.type) === 'int' ? -x | 0 : -x));
-        else if (e.op === '-') e.constValue = e.type === 'int' ? -v | 0 : -v;
+        if (isStruct(e.type)) e.constValue = v.map((x) => negateValue(numericKind(e.type), x));
+        else if (isVector(e.type)) e.constValue = e.op === '-' ? negateValue(e.type, v) : v.map((x) => (e.op === '!' ? !x : ~x));
+        else if (e.op === '-') e.constValue = negateValue(e.type, v);
         else if (e.op === '!') e.constValue = !v;
         else e.constValue = ~v;
         return;
@@ -1292,7 +1433,7 @@ class Checker {
         if (l === undefined || r === undefined || e.opMethod) return;
         if (isStruct(e.left.type) || isStruct(e.right.type)) {
           if (EQUALITY.has(e.op)) {
-            const same = l.every((x, i) => x === r[i]);
+            const same = l.every((x, i) => (Array.isArray(x) ? x.every((y, j) => y === r[i][j]) : x === r[i]));
             e.constValue = e.op === '==' ? same : !same;
             return;
           }
@@ -1303,7 +1444,12 @@ class Checker {
           if (kind === 'int' && (e.op === '/' || e.op === '%')) {
             for (let i = 0; i < n; i++) if (R(i) === 0) return; // leave it to the runtime check
           }
-          e.constValue = Array.from({ length: n }, (_, i) => evalBinary(e.op, kind, L(i), R(i)));
+          e.constValue = Array.from({ length: n }, (_, i) => (isVector(kind) ? evalVector(e.op, kind, L(i), R(i)) : evalBinary(e.op, kind, L(i), R(i))));
+          return;
+        }
+        if (isVector(e.left.type) || isVector(e.right.type)) {
+          const V = isVector(e.left.type) ? e.left.type : e.right.type;
+          e.constValue = evalVector(e.op, V, l, r);
           return;
         }
         e.constValue = evalBinary(e.op, e.left.type, l, r);
@@ -1312,6 +1458,10 @@ class Checker {
       case 'Cast': {
         const v = e.expr.constValue;
         if (v === undefined) return;
+        if (isVector(e.type)) {
+          e.constValue = v.map((x) => laneValue(e.type, castValue(x, laneType(e.expr.type), laneType(e.type))));
+          return;
+        }
         e.constValue = castValue(v, e.expr.type, e.type);
         return;
       }
@@ -1335,6 +1485,19 @@ class Checker {
         }
         const args = e.args.map((a) => a.constValue);
         if (args.some((a) => a === undefined)) return;
+        if (e.vecCtor) {
+          e.constValue = (args.length === 1 ? [0, 1, 2, 3].map(() => args[0]) : args).map((x) => laneValue(e.vecCtor, x));
+          return;
+        }
+        if (e.vecSelect) {
+          const pick = (k, i) => (Array.isArray(args[k]) ? args[k][i] : laneValue(e.vecSelect, args[k]));
+          e.constValue = args[0].map((m, i) => (m ? pick(1, i) : pick(2, i)));
+          return;
+        }
+        if (e.builtin === 'intrinsic' && isVector(e.overload[0][0])) {
+          e.constValue = foldVectorIntrinsic(e.callee, e.overload, args);
+          return;
+        }
         if (e.builtin === 'select') {
           e.constValue = args[0] ? args[1] : args[2];
         } else if (e.builtin === 'intrinsic') {
@@ -1357,13 +1520,75 @@ class Checker {
   }
 }
 
+/** The host function that prints one leaf (for a vector: one lane). */
+export function printImport(t) {
+  if (t === 'f32x4') return '__print_f32';
+  if (isVector(t)) return `__print_${laneType(t)[0]}`;
+  return `__print_${t[0]}`;
+}
+
 function article(t) {
-  return `${/^[aeiou]/i.test(String(t)) ? 'an' : 'a'} ${t}`;
+  return `${/^([aeiou]|f\d)/i.test(String(t)) ? 'an' : 'a'} ${t}`; // "an f32x4" is read "an eff..."
 }
 
 function zeroValue(t) {
   if (isStruct(t)) return t.leafTypes.map(zeroValue);
+  if (isVector(t)) return [0, 1, 2, 3].map(() => zeroValue(laneType(t)));
   return t === 'bool' ? false : t === 'str' ? '' : 0;
+}
+
+/** Normalize a lane value the way the vector stores it (f32 rounding for f32x4). */
+export function laneValue(V, x) {
+  if (V === 'f32x4') return Math.fround(x);
+  if (V === 'i32x4') return x | 0;
+  return !!x;
+}
+
+function negateValue(t, v) {
+  if (t === 'int') return -v | 0;
+  if (t === 'float') return -v;
+  return v.map((x) => laneValue(t, -x));
+}
+
+/** One f32 operation, rounded like the hardware does it. */
+function f32op(op, a, b) {
+  if (op === '%') {
+    // f32x4 has no remainder: a - trunc(a / b) * b, each step rounded to f32
+    const q = Math.trunc(Math.fround(a / b));
+    return Math.fround(a - Math.fround(q * b));
+  }
+  return Math.fround(evalBinary(op, 'float', a, b));
+}
+
+/** Fold a binary operator on vectors; a scalar operand fills all four lanes. */
+export function evalVector(op, V, l, r) {
+  const lane = laneType(V);
+  const L = (i) => (Array.isArray(l) ? l[i] : laneValue(V, l));
+  const R = (i) => (Array.isArray(r) ? r[i] : SHIFT.has(op) ? r : laneValue(V, r));
+  return [0, 1, 2, 3].map((i) => {
+    if (COMPARE.has(op) || EQUALITY.has(op)) return evalBinary(op, lane, L(i), R(i));
+    if (lane === 'float') return f32op(op, L(i), R(i));
+    return laneValue(V, evalBinary(op, lane, L(i), R(i)));
+  });
+}
+
+function foldVectorIntrinsic(name, overload, args) {
+  if (name === 'any') return args[0].some(Boolean);
+  if (name === 'all') return args[0].every(Boolean);
+  const V = overload[1];
+  const isInt = V === 'i32x4';
+  const lanes = args.map((a) => (Array.isArray(a) ? a : [0, 1, 2, 3].map(() => laneValue(V, a))));
+  const [a, b, c] = lanes;
+  return [0, 1, 2, 3].map((i) => {
+    let v;
+    if (name === 'abs') v = Math.abs(a[i]);
+    else if (name === 'min') v = Math.min(a[i], b[i]);
+    else if (name === 'max') v = Math.max(a[i], b[i]);
+    else if (name === 'clamp') v = Math.min(Math.max(a[i], b[i]), c[i]);
+    else if (name === 'round') v = nearest(a[i]);
+    else v = FOLDABLE[name](a[i]);
+    return isInt ? v | 0 : Math.fround(v);
+  });
 }
 
 function isArrayDecl(item) {

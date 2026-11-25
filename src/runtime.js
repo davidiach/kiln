@@ -21,6 +21,16 @@ export function formatFloat(v) {
   return String(v);
 }
 
+/** A float that came from an f32 lane: the shortest decimal that reads back as the same f32. */
+export function formatF32(v) {
+  if (!Number.isFinite(v)) return formatFloat(v);
+  for (let p = 1; p < 10; p++) {
+    const d = Number(v.toPrecision(p));
+    if (Math.fround(d) === v) return formatFloat(d);
+  }
+  return formatFloat(v);
+}
+
 function trapMessage(site, value) {
   const where = site.origin === 'user' ? ` (line ${site.line})` : ` (in prelude function '${site.fn}')`;
   switch (site.kind) {
@@ -101,6 +111,7 @@ export async function instantiate(compiled, opts = {}) {
     },
     __print_i: (v) => parts.push(String(v)),
     __print_f: (v) => parts.push(formatFloat(v)),
+    __print_f32: (v) => parts.push(formatF32(v)),
     __print_b: (v) => parts.push(v ? 'true' : 'false'),
     __print_s: (p) => parts.push(readStr(p)),
     __print_end: () => {
