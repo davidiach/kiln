@@ -93,7 +93,7 @@ test('operators on structs that have no built-in arithmetic', async () => {
 });
 
 test('operators compile to functions named Type.op<symbol>', () => {
-  const r = compile(`${COMPLEX} fn main() { let z = Complex(1.0, 2.0); print(z * z, z * 2.0); }`);
+  const r = compile(`${COMPLEX} fn main() { let z = Complex(1.0, 2.0); print(z * z, z * 2.0); }`, { inline: false });
   assert.ok(r.ok);
   assert.match(r.wat, /\(func \$Complex\.op\* \(param \$self\.re f64\) \(param \$self\.im f64\) \(param \$o\.re f64\) \(param \$o\.im f64\) \(result f64 f64\)/);
   assert.match(r.wat, /\(func \$Complex\.op\*_2 /);

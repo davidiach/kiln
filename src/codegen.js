@@ -44,6 +44,9 @@ export function generate(checker, sources, options = {}) {
 
 const INLINE_MAX_NODES = 48;
 const INLINE_MAX_DEPTH = 4;
+// Expression nodes one function may take in through inlining, so that nested
+// calls (f calls g twice, g calls h twice, ...) can't blow up its size.
+const INLINE_BUDGET = 1000;
 
 /** Size of an expression tree, for the inliner's budget. */
 function exprSize(e) {
@@ -121,11 +124,39 @@ class Generator {
     const screen = this.arrays.find((a) => a.name === 'screen' && a.origin === 'prelude');
 
     // ---- function bodies
-    const bodies = this.funcs.map((f) => {
-      const fg = new FnGen(this, f);
-      fg.generate();
-      return fg;
-    });
+    // Inlining can leave a reachable function with no calls left (every call
+    // to a small operator, say, was expanded in place). Such functions are
+    // dropped and the bodies generated again, so the module only holds what
+    // it calls. Imports, globals and arrays stay as they are: the inlined
+    // copies still use them.
+    const before = {
+      traps: this.traps.length,
+      segments: this.segments.length,
+      dataEnd: this.dataEnd,
+      strings: new Map(this.strings),
+      types: this.types.length,
+      typeKeys: new Map(this.typeKeys),
+    };
+    let bodies = this.generateBodies();
+    const called = new Set();
+    const pending = [...roots];
+    while (pending.length) {
+      const f = pending.pop();
+      if (called.has(f)) continue;
+      called.add(f);
+      for (const c of bodies[this.funcs.indexOf(f)].called) pending.push(c);
+    }
+    if (called.size < this.funcs.length) {
+      this.funcs = this.funcs.filter((f) => called.has(f));
+      this.funcs.forEach((f, i) => (f.index = this.imports.length + i));
+      this.traps.length = before.traps;
+      this.segments.length = before.segments;
+      this.dataEnd = before.dataEnd;
+      this.strings = before.strings;
+      this.types.length = before.types;
+      this.typeKeys = before.typeKeys;
+      bodies = this.generateBodies();
+    }
 
     // ---- globals: one wasm global per scalar leaf
     const allGlobals = [];
@@ -256,6 +287,14 @@ class Generator {
     };
   }
 
+  generateBodies() {
+    return this.funcs.map((f) => {
+      const fg = new FnGen(this, f);
+      fg.generate();
+      return fg;
+    });
+  }
+
   typeIndex(params, results) {
     const key = params.map(valType).join(',') + '->' + results.map(valType).join(',');
     let idx = this.typeKeys.get(key);
@@ -375,6 +414,8 @@ class FnGen {
     // the caller's locals holding the argument values, and the callees.
     this.inlineMap = null;
     this.inlineStack = [];
+    this.called = new Set(); // functions this body actually calls
+    this.inlinedNodes = 0;
   }
 
   generate() {
@@ -420,6 +461,11 @@ class FnGen {
       return;
     }
     this.prev = { name, arg: args[0], pos: this.code.length, line: this.lines.length };
+    if (name === 'call' && !this.gen.imports.includes(args[0])) {
+      // Calls are only ever emitted to functions that are in the module.
+      if (!this.gen.funcs.includes(args[0])) throw new Error(`codegen: call to dropped function ${args[0].name}`);
+      this.called.add(args[0]);
+    }
     if (name === 'end' || name === 'else') this.depth--;
     let text = name;
     for (const part of def) {
@@ -980,7 +1026,7 @@ class FnGen {
     const body = sym.decl.body.body;
     if (body.length !== 1 || body[0].kind !== 'Return' || !body[0].value) return false;
     if (sym.inlineSize === undefined) sym.inlineSize = exprSize(body[0].value);
-    return sym.inlineSize <= INLINE_MAX_NODES;
+    return sym.inlineSize <= INLINE_MAX_NODES && this.inlinedNodes + sym.inlineSize <= INLINE_BUDGET;
   }
 
   /**
@@ -994,6 +1040,7 @@ class FnGen {
       const saved = this.inlineMap;
       this.inlineMap = map;
       this.inlineStack.push(sym);
+      this.inlinedNodes += sym.inlineSize;
       this.comment(`inlined ${sym.name}`);
       this.expr(sym.decl.body.body[0].value);
       this.inlineStack.pop();

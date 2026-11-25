@@ -36,7 +36,7 @@ test('functions take and return structs (multi-value)', async () => {
       print(cross(x, y), cross(x, y).z, dot(normalize(Vec3(3.0, 0.0, 4.0)), Vec3(0.0, 0.0, 1.0)));
     }`;
   assert.deepEqual(await run(src), ['Vec3(0.0, 0.0, 1.0) 1.0 0.8']);
-  const r = compile(src);
+  const r = compile(src, { inline: false });
   assert.match(r.wat, /\(func \$cross \(param \$a\.x f64\).*\(result f64 f64 f64\)/);
 });
 
@@ -100,8 +100,9 @@ test('integer struct division checks every component for zero', async () => {
 });
 
 test('reading a field of a local is a single local.get', () => {
-  const r = compile(`${V3} fn f(v: Vec3) -> float { return v.z; } fn main() { print(f(Vec3(1.0, 2.0, 3.0))); }`);
+  const r = compile(`${V3} fn f(v: Vec3) -> float { return v.z; } fn main() { print(f(Vec3(1.0, 2.0, 3.0))); }`, { inline: false });
   const body = r.wat.slice(r.wat.indexOf('(func $f'), r.wat.indexOf('(func $main'));
+  assert.match(body, /^\(func \$f/);
   assert.match(body, /local\.get \$v\.z\n\s+return/);
   assert.doesNotMatch(body, /\$t\./, 'no temporaries');
 });

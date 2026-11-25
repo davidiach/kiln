@@ -70,6 +70,59 @@ test('small functions, methods and operators are inlined; big and recursive ones
   assert.doesNotMatch(compile(src, { inline: false }).wat, /;; inlined/);
 });
 
+test('a function inlined at every call site is left out of the module', async () => {
+  const src = `
+    fn sq(x: float) -> float { return x * x; }
+    fn cube(x: float) -> float { return x * sq(x); }
+    fn far(x: float) -> float { var s = 0.0; for i in 0..3 { s += sq(x); } return s; }
+    fn main() { print(cube(2.0), far(1.5), "done"); }`;
+  const r = compile(src);
+  assert.doesNotMatch(r.wat, /\(func \$cube/, 'every call to cube was inlined');
+  assert.match(r.wat, /\(func \$far/, 'far has a loop, so it stays a call');
+  assert.doesNotMatch(r.wat, /\(func \$sq/, 'sq is inlined inside cube and inside far');
+  assert.equal(r.stats.functions, 2);
+  assert.ok(r.binary.length < compile(src, { inline: false }).binary.length);
+  const lines = [];
+  await (await instantiate(r, { print: (l) => lines.push(l) })).main();
+  assert.deepEqual(lines, ['8.0 6.75 done']);
+});
+
+test("nested inlining has a size budget, so code can't blow up", async () => {
+  // Each level calls the next 8 times, so inlining d fully would paste in
+  // 8 + 64 + 512 copies of the levels below it.
+  const level = (name, next) => `fn ${name}(x: float) -> float { return ${[...Array(8)].map((_, i) => `${next}(x + ${i}.0)`).join(' + ')}; }`;
+  const src = [
+    'fn h(x: float) -> float { return x * 0.5; }',
+    level('g', 'h'), level('f', 'g'), level('e', 'f'), level('d', 'e'),
+    'fn main() { print(d(1.0)); }',
+  ].join('\n');
+  const r = compile(src);
+  const plain = compile(src, { inline: false });
+  assert.ok(r.binary.length < 10000, `module is ${r.binary.length} bytes`);
+  const run1 = async (c) => { const l = []; (await instantiate(c, { print: (x) => l.push(x) })).main(); return l; };
+  assert.deepEqual(await run1(r), await run1(plain));
+});
+
+test('a function that is still called somewhere stays, even if inlined elsewhere', () => {
+  const src = `
+    fn sq(x: float) -> float { return x * x; }
+    export fn api(x: float) -> float { return sq(x) + 1.0; }
+    fn main() { print(sq(3.0)); }`;
+  const r = compile(src);
+  assert.match(r.wat, /\(func \$api \(export "api"\)/, 'exported functions always stay');
+  assert.doesNotMatch(r.wat, /\(func \$sq/);
+  const deep = compile(`
+    fn a(x: int) -> int { return x + 1; }
+    fn b(x: int) -> int { return a(a(x)); }
+    fn c(x: int) -> int { return b(b(x)); }
+    fn d(x: int) -> int { return c(c(x)); }
+    fn e(x: int) -> int { return d(d(x)); }
+    fn main() { print(e(0)); }`);
+  // The inliner stops 4 levels deep, so the innermost calls to a remain calls.
+  assert.match(deep.wat, /\(func \$a /);
+  assert.match(deep.wat, /call \$a/);
+});
+
 test('arguments are still evaluated exactly once, left to right', async () => {
   const src = `
     fn twice(x: int) -> int { return x + x; }
@@ -77,6 +130,32 @@ test('arguments are still evaluated exactly once, left to right', async () => {
     fn noisy(n: int) -> int { print("eval", n); return n; }
     fn main() { print(twice(noisy(3)), first(noisy(1), noisy(2))); }`;
   assert.deepEqual(await run(src), ['eval 3', 'eval 1', 'eval 2', '6 1']);
+});
+
+test('an argument keeps its value when a later argument changes the variable', async () => {
+  // bump() changes its receiver and returns the old value, so reading the
+  // first operand too late would show up as 2 instead of 1.
+  const src = `
+    struct V { x: int }
+    impl V {
+      fn bump(var self) -> V { let old = self; self.x += 1; return old; }
+      fn +(self, o: V) -> V { return V(self.x * 10 + o.x); }
+      fn <(self, o: V) -> bool { return self.x < o.x; }
+    }
+    fn pair(a: V, b: V) -> int { return a.x * 10 + b.x; }
+    fn main() {
+      var v = V(1); print(v + v.bump(), v);
+      var w = V(1); print(w > w.bump(), w);
+      var p = V(1); print(pair(p, p.bump()), p);
+    }`;
+  for (const inline of [true, false]) {
+    const r = compile(src, { inline });
+    assert.ok(r.ok);
+    const lines = [];
+    const inst = await instantiate(r, { print: (l) => lines.push(l) });
+    inst.main();
+    assert.deepEqual(lines, ['V(11) V(2)', 'false V(2)', '11 V(2)'], `inline: ${inline}`);
+  }
 });
 
 test('a trap inside inlined code still reports its own line', async () => {
