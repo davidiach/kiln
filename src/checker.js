@@ -74,6 +74,10 @@ class Checker {
       this.origin = f.origin;
       this.resolveSignature(f);
     }
+    for (const S of this.structs) {
+      this.origin = S.origin;
+      this.checkOperators(S);
+    }
     for (const sym of this.top.values()) {
       this.origin = sym.origin;
       if (sym.kind === 'const') this.resolveConst(sym);
@@ -117,7 +121,7 @@ class Checker {
       this.funcs.push(sym);
     } else if (item.kind === 'Struct') {
       sym = {
-        kind: 'struct', name, decl: item, origin, fields: [], state: 'pending', methods: new Map(),
+        kind: 'struct', name, decl: item, origin, fields: [], state: 'pending', methods: new Map(), operators: [],
         toString() {
           return this.name;
         },
@@ -188,6 +192,10 @@ class Checker {
       return;
     }
     for (const m of item.methods) {
+      if (m.isOperator) {
+        this.declareOperator(S, m, origin);
+        continue;
+      }
       if (S.methods.has(m.name)) {
         this.err(`${S.name} already has a method named '${m.name}'`, m.nameSpan);
         continue;
@@ -205,6 +213,94 @@ class Checker {
       S.methods.set(m.name, sym);
       this.funcs.push(sym);
     }
+  }
+
+  /** fn +(self, o: T) -> T and friends. A struct may define one operator for several operand types. */
+  declareOperator(S, m, origin) {
+    if (m.self === 'var') this.err(`operators can't take 'var self'; return a new value instead`, m.selfSpan);
+    const n = S.operators.filter((o) => o.op === m.name).length;
+    const sym = {
+      kind: 'func', name: `${S.name}.op${m.name}${n ? `_${n + 1}` : ''}`, op: m.name, isOperator: true,
+      owner: S, selfMode: m.self ? 'value' : null, decl: m, origin, exported: false,
+      calls: new Set(), imports: new Set(), globals: new Set(), arrays: new Set(),
+      locals: [], params: [], ret: 'void', paramLeafCount: 0,
+    };
+    S.operators.push(sym);
+    this.funcs.push(sym);
+  }
+
+  checkOperators(S) {
+    const seen = new Set();
+    for (const o of S.operators) {
+      const types = o.params.map((p) => p.type);
+      const span = o.decl.nameSpan;
+      o.operandTypes = types;
+      o.unary = types.length === 1;
+      if (types.includes('error') || o.ret === 'error') {
+        o.bad = true;
+        continue;
+      }
+      if (types.length === 1) {
+        if (o.op !== '-') {
+          this.err(`'${o.op}' needs two operands`, span, `write it like fn ${o.op}(self, other: ${S.name}) -> ...`);
+          o.bad = true;
+        } else if (types[0] !== S) {
+          this.err(`unary '-' must take self`, span, `fn -(self) -> ${S.name}`);
+          o.bad = true;
+        }
+      } else if (types.length === 2) {
+        if (types[0] !== S && types[1] !== S) {
+          this.err(`an operator in impl ${S.name} must take ${article(S.name)} on one side`, span);
+          o.bad = true;
+        }
+      } else {
+        this.err(`'${o.op}' takes one or two operands, not ${types.length}`, span);
+        o.bad = true;
+      }
+      if ((COMPARE.has(o.op) || EQUALITY.has(o.op)) && o.ret !== 'bool') {
+        this.err(`'${o.op}' must return bool`, span);
+        o.bad = true;
+      } else if (o.ret === 'void') {
+        this.err(`'${o.op}' must return a value`, span);
+        o.bad = true;
+      }
+      const key = `${o.op}(${types.join(', ')})`;
+      if (!o.bad && seen.has(key)) {
+        this.err(`${S.name} already defines ${key}`, span);
+        o.bad = true;
+      }
+      seen.add(key);
+    }
+  }
+
+  /**
+   * Find a user-defined operator for e.op with these operand types. Derived
+   * forms: != is !(==), > is < swapped, <= is !(< swapped), >= is !(<).
+   */
+  userOperator(e, lt, rt) {
+    const cands = [...(isStruct(lt) ? lt.operators : []), ...(isStruct(rt) && rt !== lt ? rt.operators : [])].filter((o) => !o.bad && !o.unary);
+    if (!cands.length) return null;
+    const fits = (node, t, want) => t === want || (want === 'float' && t === 'int' && this.coercible(node));
+    const find = (op, swap) => {
+      const [a, at, b, bt] = swap ? [e.right, rt, e.left, lt] : [e.left, lt, e.right, rt];
+      const ms = cands.filter((o) => o.op === op);
+      const exact = ms.find((o) => o.operandTypes[0] === at && o.operandTypes[1] === bt);
+      if (exact) return exact;
+      const loose = ms.find((o) => fits(a, at, o.operandTypes[0]) && fits(b, bt, o.operandTypes[1]));
+      if (loose) {
+        if (loose.operandTypes[0] !== at) this.toFloat(a);
+        if (loose.operandTypes[1] !== bt) this.toFloat(b);
+      }
+      return loose ?? null;
+    };
+    const op = e.op;
+    let sym = find(op, false);
+    if (sym) return { sym, swap: false, negate: false };
+    if (op === '!=' && (sym = find('==', false))) return { sym, swap: false, negate: true };
+    if (op === '>' && (sym = find('<', true))) return { sym, swap: true, negate: false };
+    if (op === '<=' && (sym = find('<', true))) return { sym, swap: true, negate: true };
+    if (op === '>=' && (sym = find('<', false))) return { sym, swap: false, negate: true };
+    return null;
   }
 
   resolveSignature(f) {
@@ -393,11 +489,14 @@ class Checker {
     this.scopes = [new Map()];
     this.loops = 0;
     let first = 0;
+    sym.paramSyms = [];
     if (sym.selfMode) {
-      this.declareLocal('self', sym.owner, sym.selfMode === 'var', false).isSelf = true;
+      const self = this.declareLocal('self', sym.owner, sym.selfMode === 'var', false);
+      self.isSelf = true;
+      sym.paramSyms.push(self);
       first = 1;
     }
-    sym.decl.params.forEach((p, i) => this.declareLocal(p.name, sym.params[first + i].type, false, false));
+    sym.decl.params.forEach((p, i) => sym.paramSyms.push(this.declareLocal(p.name, sym.params[first + i].type, false, false)));
     sym.paramLeafCount = sym.locals.length;
     this.block(sym.decl.body);
     if (sym.ret !== 'void' && sym.ret !== 'error' && !returns(sym.decl.body)) {
@@ -566,6 +665,7 @@ class Checker {
         this.err(`'${s.op}=' would change the type of '${describeTarget(tgt)}' from ${targetType} to ${rt}`, s.span);
       }
       s.checkZero = fake.checkZero;
+      s.opMethod = fake.opMethod;
     }
   }
 
@@ -672,6 +772,18 @@ class Checker {
       case 'Unary': {
         const t = this.expr(e.operand);
         if (t === 'error') return t;
+        if (e.op === '-' && isStruct(t)) {
+          const neg = t.operators.find((o) => o.op === '-' && o.unary && !o.bad);
+          if (neg) {
+            if (!this.fn) {
+              this.err(`operators defined in an impl can't be used in constant expressions`, e.span);
+              return 'error';
+            }
+            this.fn.calls.add(neg);
+            e.opMethod = { sym: neg };
+            return neg.ret;
+          }
+        }
         if (e.op === '-' && (t === 'int' || t === 'float' || numericKind(t))) return t;
         if (e.op === '!' && t === 'bool') return t;
         if (e.op === '~' && t === 'int') return t;
@@ -769,7 +881,19 @@ class Checker {
       this.err(`can't apply '${op}' to ${lt} and ${rt}`, e.opSpan ?? e.span, hint);
       return 'error';
     };
-    if (isStruct(lt) || isStruct(rt)) return this.structBinary(e, lt, rt, bad);
+    if (isStruct(lt) || isStruct(rt)) {
+      const u = this.userOperator(e, lt, rt);
+      if (u) {
+        if (!this.fn) {
+          this.err(`operators defined in an impl can't be used in constant expressions`, e.opSpan ?? e.span);
+          return 'error';
+        }
+        this.fn.calls.add(u.sym);
+        e.opMethod = u;
+        return u.negate || u.swap ? 'bool' : u.sym.ret;
+      }
+      return this.structBinary(e, lt, rt, bad);
+    }
     if (op === '&&' || op === '||') {
       if (lt === 'bool' && rt === 'bool') return 'bool';
       return bad(`'${op}' works on bools; compare ints explicitly, e.g. x != 0`);
@@ -819,10 +943,11 @@ class Checker {
   structBinary(e, lt, rt, bad) {
     const op = e.op;
     if (EQUALITY.has(op)) return lt === rt ? 'bool' : bad();
-    if (!ARITH.has(op)) return bad(`'${op}' doesn't work on structs`);
+    const S0 = isStruct(lt) ? lt : rt;
+    if (!ARITH.has(op)) return bad(COMPARE.has(op) ? `define it: impl ${S0} { fn <(self, o: ${S0}) -> bool { ... } } gives < > <= >=` : `'${op}' doesn't work on structs`);
     const S = isStruct(lt) ? lt : rt;
     const kind = numericKind(S);
-    if (!kind) return bad(`arithmetic works on structs whose fields are all floats or all ints`);
+    if (!kind) return bad(`built-in arithmetic only covers structs whose fields are all floats or all ints; define it: impl ${S} { fn ${op}(self, o: ${S}) -> ${S} { ... } }`);
     if (isStruct(lt) && isStruct(rt)) {
       if (lt !== rt) return bad();
     } else {
@@ -1154,7 +1279,7 @@ class Checker {
       }
       case 'Unary': {
         const v = e.operand.constValue;
-        if (v === undefined) return;
+        if (v === undefined || e.opMethod) return;
         if (isStruct(e.type)) e.constValue = v.map((x) => (numericKind(e.type) === 'int' ? -x | 0 : -x));
         else if (e.op === '-') e.constValue = e.type === 'int' ? -v | 0 : -v;
         else if (e.op === '!') e.constValue = !v;
@@ -1164,7 +1289,7 @@ class Checker {
       case 'Binary': {
         const l = e.left.constValue;
         const r = e.right.constValue;
-        if (l === undefined || r === undefined) return;
+        if (l === undefined || r === undefined || e.opMethod) return;
         if (isStruct(e.left.type) || isStruct(e.right.type)) {
           if (EQUALITY.has(e.op)) {
             const same = l.every((x, i) => x === r[i]);

@@ -36,7 +36,7 @@ test('functions take and return structs (multi-value)', async () => {
       print(cross(x, y), cross(x, y).z, dot(normalize(Vec3(3.0, 0.0, 4.0)), Vec3(0.0, 0.0, 1.0)));
     }`;
   assert.deepEqual(await run(src), ['Vec3(0.0, 0.0, 1.0) 1.0 0.8']);
-  const r = compile(src);
+  const r = compile(src, { inline: false });
   assert.match(r.wat, /\(func \$cross \(param \$a\.x f64\).*\(result f64 f64 f64\)/);
 });
 
@@ -100,8 +100,9 @@ test('integer struct division checks every component for zero', async () => {
 });
 
 test('reading a field of a local is a single local.get', () => {
-  const r = compile(`${V3} fn f(v: Vec3) -> float { return v.z; } fn main() { print(f(Vec3(1.0, 2.0, 3.0))); }`);
+  const r = compile(`${V3} fn f(v: Vec3) -> float { return v.z; } fn main() { print(f(Vec3(1.0, 2.0, 3.0))); }`, { inline: false });
   const body = r.wat.slice(r.wat.indexOf('(func $f'), r.wat.indexOf('(func $main'));
+  assert.match(body, /^\(func \$f/);
   assert.match(body, /local\.get \$v\.z\n\s+return/);
   assert.doesNotMatch(body, /\$t\./, 'no temporaries');
 });
@@ -134,7 +135,7 @@ test('struct errors', () => {
   has(errors(`${V2} ${V3} fn main() { let a = Vec2(1.0, 2.0) + Vec3(1.0, 2.0, 3.0); }`), /can't apply '\+' to Vec2 and Vec3/);
   has(errors('struct M { a: int, b: float } fn main() { let m = M(1, 2.0) * 2; }'), /all floats or all ints/);
   has(errors(`${V2} fn main() { let a = 2; let v = Vec2(1.0, 2.0) * a; }`), /a Vec2 can be combined with a float, not an int/);
-  has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); let b = v < v; }`), /doesn't work on structs/);
+  has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); let b = v < v; }`), /can't apply '<' to Vec2 and Vec2.*fn <\(self, o: Vec2\) -> bool/);
   has(errors(`${V2} fn main() { let v = select(true, Vec2(1.0, 2.0), Vec2(0.0, 0.0)); }`), /cond \? a : b/);
   has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0) as int; }`), /can't convert Vec2 to int/);
   has(errors(`${V2} fn main() { let v = Vec2(1.0, 2.0); var x = 1.0; x += v; }`), /would change the type/);

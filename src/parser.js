@@ -20,6 +20,9 @@ const BINARY_PREC = {
   '*': 10, '/': 10, '%': 10,
 };
 
+// Operators a struct can define in an impl block: fn +(self, o: T) -> T
+export const OVERLOADABLE = new Set(['+', '-', '*', '/', '%', '==', '!=', '<', '<=', '>', '>=']);
+
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', '>>>=']);
 
 const join = (a, b) => ({ start: a.start, end: b.end, line: a.line, col: a.col });
@@ -142,7 +145,12 @@ class Parser {
 
   fn(exported, startTok, isMethod = false) {
     this.expect('fn');
-    const nameTok = this.ident(isMethod ? 'a method name' : 'a function name');
+    const op = this.peek();
+    const isOperator = isMethod && op.kind === 'punct' && OVERLOADABLE.has(op.text);
+    if (!isMethod && op.kind === 'punct' && OVERLOADABLE.has(op.text)) {
+      throw this.error(`operators can only be defined for a struct, inside its impl block: impl T { fn ${op.text}(self, o: T) -> T { ... } }`);
+    }
+    const nameTok = isOperator ? this.next() : this.ident(isMethod ? 'a method name' : 'a function name');
     this.expect('(', 'after function name');
     const params = [];
     // A method's first parameter may be `self` (a copy of the value it's
@@ -186,6 +194,7 @@ class Parser {
       ret,
       body,
       exported,
+      isOperator,
       self,
       selfSpan,
       span: join(startTok, nameTok),

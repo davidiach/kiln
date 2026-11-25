@@ -216,6 +216,83 @@ back where the receiver came from:
 The ray marcher's vector math and the particle fountain's update loop use methods; both render byte-for-byte the same
 images as before, at the same speed.
 
+### Operator methods
+
+```rust
+struct Complex { re: float, im: float }
+
+impl Complex {
+  // (a + bi)(c + di) = (ac - bd) + (ad + bc)i
+  fn *(self, o: Complex) -> Complex {
+    return Complex(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re);
+  }
+  fn abs2(self) -> float { return self.re * self.re + self.im * self.im; }
+}
+
+while i < max_iter && z.abs2() < 256.0 {
+  z = z * z + c;        // your *, then the built-in component-wise +
+  i += 1;
+}
+```
+
+- Define `+ - * / % == != < <= > >=` inside an `impl`, and unary `-` as `fn -(self)`.
+- Operators **overload by operand type**, and the struct can be on either side: `fn *(self, k: float)` handles `z * 2.0`
+  and `fn *(k: float, z: Complex)` handles `2.0 * z`. An int literal is accepted where a float operand is expected.
+- **Derived comparisons:** `!=` comes from `==`, and `>`, `<=`, `>=` from `<`. Operands are still evaluated left to
+  right, and an operator you define yourself always wins over a derived one.
+- Anything you don't define keeps the **built-in behavior** (component-wise math, structural `==`), so `Complex` above
+  gets `+` and `-` for free. Compound assignment (`z *= w`) uses your operator too.
+- The checker requires exactly one or two operands, a struct of the impl's type on one side, `bool` from comparisons,
+  and no `var self`. Using an operator a struct has no built-in version of (like `<`, or `+` on a struct with a `str`
+  field) gets a hint showing the method to write.
+
+An operator is a method named `Type.op<symbol>`, so `z * w` is a call to `$Complex.op*` (overloads get a `_2`, `_3`
+suffix). User operators run at run time, so they can't appear in a `const`.
+
+To keep operators as cheap as the math they replace, codegen **inlines** small functions: any function, method or
+operator whose body is a single `return <expr>;` of at most 48 nodes is expanded in place, up to 4 levels deep and at
+most 1000 inlined nodes per function. Arguments are evaluated once, left to right, into locals (a variable argument is
+used in place), and a function inlined at every call site is left out of the module. This function:
+
+```rust
+export fn step(z: Complex, c: Complex) -> Complex { return z * z + c; }
+```
+
+compiles to the complex multiplication pasted in place, then the component-wise `+`, with no call:
+
+```wasm
+(func $step (export "step") (param $z.re f64) (param $z.im f64) (param $c.re f64) (param $c.im f64) (result f64 f64)
+  (local $t.4 f64) (local $t.5 f64)
+  ;; inlined Complex.op*
+  local.get $z.re
+  local.get $z.re
+  f64.mul
+  local.get $z.im
+  local.get $z.im
+  f64.mul
+  f64.sub
+  local.get $z.re
+  local.get $z.im
+  f64.mul
+  local.get $z.im
+  local.get $z.re
+  f64.mul
+  f64.add
+  local.set $t.5
+  local.tee $t.4
+  local.get $c.re
+  f64.add
+  local.get $t.5
+  local.get $c.im
+  f64.add
+  return
+)
+```
+
+The Mandelbrot example is written this way. It renders exactly the same pixels as the scalar version it replaced and
+runs within about 8% of its speed. Inlining also makes the ray marcher 19% faster. `compile(src, { inline: false })`
+turns it off; the tests check that every example prints, draws and plays exactly the same either way.
+
 ### Sound
 
 ```rust
@@ -284,7 +361,8 @@ A few details I enjoyed:
   is exactly what runs, interleaved with the source lines that produced it.
 - **Dead code elimination falls out of the checker.** Each function records what it calls and which globals, arrays
   and imports it touches. Codegen walks that graph from `main`/`frame`/exports, so the plasma example ships 5 functions
-  and strips the other 22, and imports only the 3 host functions it uses (`sin`, `cos`, and the trap hook).
+  and strips the other 25 (3 once small ones are inlined), and imports only the 3 host functions it uses (`sin`, `cos`,
+  and the trap hook).
 - **Fields are places, not values.** Codegen resolves `a.b.c` and `arr[i].pos.x` to a *place* (a run of locals, a run of
   globals, or a base address plus a constant offset) and loads or stores only the leaves it needs.
 - **Arrays use the memarg offset.** `grid[i]` compiles to `i32.load offset=<grid's address>` with the scaled index on the
@@ -325,7 +403,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 93 tests: language semantics, structs, methods, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 123 tests: language semantics, structs, methods, operators, inlining, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -336,9 +414,9 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 ## Limits and ideas
 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
-modules; arrays are global and can't be passed around. Natural next steps would be operator methods (`+` on your own
-types beyond component-wise math),
-`f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back to lines.
+modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies. Natural
+next steps would be `f32`/SIMD for faster shading, a pass that reuses locals, and source maps from wasm offsets back
+to lines.
 
 ## License
 

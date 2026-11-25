@@ -98,7 +98,8 @@ test('different structs can have methods with the same name', async () => {
 });
 
 test('methods compile to functions named Type.method; var self returns the receiver', () => {
-  const r = compile(`${VEC} fn main() { var v = Vec2(1.0, 2.0); v.scale(2.0); print(v.length()); }`);
+  // Without inlining, so the small methods keep their own functions.
+  const r = compile(`${VEC} fn main() { var v = Vec2(1.0, 2.0); v.scale(2.0); print(v.length()); }`, { inline: false });
   assert.ok(r.ok);
   assert.match(r.wat, /\(func \$Vec2\.length \(param \$self\.x f64\) \(param \$self\.y f64\) \(result f64\)/);
   assert.match(r.wat, /\(func \$Vec2\.scale \(param \$self\.x f64\) \(param \$self\.y f64\) \(param \$k f64\) \(result f64 f64\)/);
@@ -131,8 +132,9 @@ test('operands keep their values when a later operand calls a var self method', 
 });
 
 test('struct locals are still used in place when nothing can change them', () => {
-  const r = compile(`${VEC} fn add(a: Vec2, b: Vec2) -> Vec2 { return a + b; } fn main() { print(add(Vec2(1.0, 2.0), Vec2(3.0, 4.0))); }`);
+  const r = compile(`${VEC} fn add(a: Vec2, b: Vec2) -> Vec2 { return a + b; } fn main() { print(add(Vec2(1.0, 2.0), Vec2(3.0, 4.0))); }`, { inline: false });
   const body = r.wat.slice(r.wat.indexOf('(func $add'), r.wat.indexOf('(func $main'));
+  assert.match(body, /^\(func \$add/);
   assert.doesNotMatch(body, /\$t\./, 'no copies into temporaries');
 });
 

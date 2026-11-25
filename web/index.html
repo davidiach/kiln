@@ -96,6 +96,16 @@ balls[0].vel.y -= 1.0;</pre>
 }</pre>
         <p><code>self</code> is a copy of the value the method is called on. A <code>var self</code> method changes that value, so it can be called on variables, array elements and fields, but not on temporaries. A method without <code>self</code> is called on the type.</p>
         <p>Structs whose fields are all floats (or all ints) support <code>+ - * / %</code> with each other and with a single number. Any struct supports <code>==</code> and <code>!=</code>. <code>print(v)</code> shows <code>Vec2(1.0, 2.0)</code>.</p>
+        <h3>Operator methods</h3>
+        <pre>impl Complex {
+  fn *(self, o: Complex) -&gt; Complex { ... }   // z * w
+  fn *(self, k: float) -&gt; Complex { ... }     // z * 2.0
+  fn *(k: float, z: Complex) -&gt; Complex { ... } // 2.0 * z
+  fn -(self) -&gt; Complex { ... }               // -z
+  fn &lt;(self, o: Complex) -&gt; bool { ... }      // also gives &gt; &lt;= &gt;=
+}
+z = z * z + c;   // + falls back to component-wise</pre>
+        <p>Define <code>+ - * / % == != &lt; &lt;= &gt; &gt;=</code> in an <code>impl</code>, and unary <code>-</code> with just <code>self</code>. Overloads are picked by operand type, and the struct can be on either side. <code>!=</code> comes from <code>==</code>, and <code>&gt; &lt;= &gt;=</code> from <code>&lt;</code>. Anything you don't define keeps the built-in behavior, and compound assignment like <code>z *= w</code> uses your operator. Small operators and methods are inlined, so they cost about the same as writing the math out.</p>
         <h3>Sound</h3>
         <pre>beep(440.0, 0.2);                       // frequency in Hz, seconds
 sound(WAVE_SQUARE, 880.0, 1760.0, 0.1, 0.4);  // wave, from Hz, to Hz, seconds, volume

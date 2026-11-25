@@ -17,7 +17,11 @@ let preludeTokens = null;
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-export function compile(source) {
+/**
+ * options.inline (default true): expand calls to small single-expression
+ * functions, methods and operators at the call site.
+ */
+export function compile(source, options = {}) {
   const t0 = now();
   try {
     preludeTokens ??= lex(PRELUDE);
@@ -33,7 +37,7 @@ export function compile(source) {
       const errors = [...ck.errors].sort((a, b) => a.span.start - b.span.start);
       return { ok: false, errors, time: now() - t0 };
     }
-    const out = generate(ck, { user: source, prelude: PRELUDE });
+    const out = generate(ck, { user: source, prelude: PRELUDE }, options);
     return {
       ok: true,
       ...out,
