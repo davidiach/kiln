@@ -489,11 +489,14 @@ class Checker {
     this.scopes = [new Map()];
     this.loops = 0;
     let first = 0;
+    sym.paramSyms = [];
     if (sym.selfMode) {
-      this.declareLocal('self', sym.owner, sym.selfMode === 'var', false).isSelf = true;
+      const self = this.declareLocal('self', sym.owner, sym.selfMode === 'var', false);
+      self.isSelf = true;
+      sym.paramSyms.push(self);
       first = 1;
     }
-    sym.decl.params.forEach((p, i) => this.declareLocal(p.name, sym.params[first + i].type, false, false));
+    sym.decl.params.forEach((p, i) => sym.paramSyms.push(this.declareLocal(p.name, sym.params[first + i].type, false, false)));
     sym.paramLeafCount = sym.locals.length;
     this.block(sym.decl.body);
     if (sym.ret !== 'void' && sym.ret !== 'error' && !returns(sym.decl.body)) {

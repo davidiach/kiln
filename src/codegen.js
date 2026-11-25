@@ -38,13 +38,26 @@ const align = (n, a) => Math.ceil(n / a) * a;
  */
 const resultsOf = (f) => [...leafTypes(f.ret), ...(f.selfMode === 'var' ? leafTypes(f.owner) : [])];
 
-export function generate(checker, sources) {
-  return new Generator(checker, sources).run();
+export function generate(checker, sources, options = {}) {
+  return new Generator(checker, sources, options).run();
+}
+
+const INLINE_MAX_NODES = 48;
+const INLINE_MAX_DEPTH = 4;
+
+/** Size of an expression tree, for the inliner's budget. */
+function exprSize(e) {
+  if (!e || typeof e !== 'object') return 0;
+  let n = 1;
+  for (const k of ['left', 'right', 'operand', 'expr', 'cond', 'then', 'else', 'target', 'index', 'receiver']) n += exprSize(e[k]);
+  if (e.args) for (const a of e.args) n += exprSize(a);
+  return n;
 }
 
 class Generator {
-  constructor(ck, sources) {
+  constructor(ck, sources, options = {}) {
     this.ck = ck;
+    this.inline = options.inline !== false;
     this.sources = Object.fromEntries(Object.entries(sources).map(([k, v]) => [k, v.split('\n')]));
     this.traps = [];
     this.strings = new Map();
@@ -358,6 +371,10 @@ class FnGen {
     this.free = { i32: [], f64: [] };
     this.src = gen.sources[sym.origin] ?? [];
     this.lastLine = -1;
+    // While a call is being inlined: the callee's parameter symbols mapped to
+    // the caller's locals holding the argument values, and the callees.
+    this.inlineMap = null;
+    this.inlineStack = [];
   }
 
   generate() {
@@ -516,6 +533,13 @@ class FnGen {
     return { locals: temps, temps };
   }
 
+  /** The wasm locals holding a local variable's leaves (remapped inside an inlined call). */
+  localIndices(sym) {
+    const mapped = this.inlineMap?.get(sym);
+    if (mapped) return mapped;
+    return leafTypes(sym.type).map((_, i) => sym.index + i);
+  }
+
   /**
    * Make the leaves of `e` available in locals. A local variable is used in
    * place, unless one of the `later` expressions (evaluated after `e`) could
@@ -523,7 +547,7 @@ class FnGen {
    */
   materialize(e, later = []) {
     if (e.constValue === undefined && e.kind === 'Ident' && e.sym.kind === 'local' && !later.some(mayMutate)) {
-      return { locals: leafTypes(e.type).map((_, i) => e.sym.index + i), temps: [] };
+      return { locals: this.localIndices(e.sym), temps: [] };
     }
     this.expr(e);
     return this.spill(e.type);
@@ -534,7 +558,8 @@ class FnGen {
   }
 
   trap(info, valueLocal) {
-    const site = this.gen.trapSite({ ...info, origin: this.sym.origin, fn: this.sym.name });
+    const owner = this.inlineStack[this.inlineStack.length - 1] ?? this.sym;
+    const site = this.gen.trapSite({ ...info, origin: owner.origin, fn: owner.name });
     this.emit('i32.const', site);
     if (valueLocal === undefined) this.emit('i32.const', 0);
     else this.emit('local.get', valueLocal);
@@ -566,7 +591,7 @@ class FnGen {
     switch (e.kind) {
       case 'Ident': {
         const s = e.sym;
-        if (s.kind === 'local') return { kind: 'local', base: s.index, type: e.type, temps: [] };
+        if (s.kind === 'local') return { kind: 'local', idx: this.localIndices(s), type: e.type, temps: [] };
         if (s.kind === 'global') return { kind: 'global', sym: s, leaf: 0, type: e.type, temps: [] };
         return null;
       }
@@ -576,7 +601,7 @@ class FnGen {
         const S = e.target.type;
         const i = e.fieldIndex;
         const type = S.fields[i].type;
-        if (p.kind === 'local') return { ...p, base: p.base + S.fieldLeaf[i], type };
+        if (p.kind === 'local') return { ...p, idx: p.idx.slice(S.fieldLeaf[i], S.fieldLeaf[i] + leafTypes(type).length), type };
         if (p.kind === 'global') return { ...p, leaf: p.leaf + S.fieldLeaf[i], type };
         return { ...p, offset: p.offset + S.fieldOffset[i], type };
       }
@@ -607,7 +632,7 @@ class FnGen {
 
   loadPlace(p) {
     leafTypes(p.type).forEach((t, i) => {
-      if (p.kind === 'local') this.emit('local.get', p.base + i);
+      if (p.kind === 'local') this.emit('local.get', p.idx[i]);
       else if (p.kind === 'global') this.emit('global.get', this.globalLeaf(p.sym, p.leaf + i));
       else {
         this.memBase(p);
@@ -620,7 +645,7 @@ class FnGen {
   storePlace(p) {
     const ls = leafTypes(p.type);
     if (p.kind === 'local') {
-      for (let i = ls.length - 1; i >= 0; i--) this.emit('local.set', p.base + i);
+      for (let i = ls.length - 1; i >= 0; i--) this.emit('local.set', p.idx[i]);
     } else if (p.kind === 'global') {
       for (let i = ls.length - 1; i >= 0; i--) this.emit('global.set', this.globalLeaf(p.sym, p.leaf + i));
     } else {
@@ -848,8 +873,7 @@ class FnGen {
       }
       case 'Unary':
         if (e.opMethod) {
-          this.expr(e.operand);
-          this.emit('call', e.opMethod.sym);
+          this.callExprs(e.opMethod.sym, [e.operand]);
           return;
         }
         if (isStruct(e.type)) {
@@ -949,21 +973,59 @@ class FnGen {
     throw new Error(`codegen: unknown expression ${e.kind}`);
   }
 
+  /** Can a call to `sym` be expanded in place? Small `return <expr>;` bodies only. */
+  inlineable(sym) {
+    if (!this.gen.inline || sym.selfMode === 'var' || !sym.paramSyms) return false;
+    if (this.inlineStack.includes(sym) || this.inlineStack.length >= INLINE_MAX_DEPTH) return false;
+    const body = sym.decl.body.body;
+    if (body.length !== 1 || body[0].kind !== 'Return' || !body[0].value) return false;
+    if (sym.inlineSize === undefined) sym.inlineSize = exprSize(body[0].value);
+    return sym.inlineSize <= INLINE_MAX_NODES;
+  }
+
+  /**
+   * Call `sym` with arguments already held in locals (one materialize() result
+   * per parameter): inline its body if possible, otherwise push and call.
+   */
+  callWith(sym, args) {
+    if (this.inlineable(sym)) {
+      const map = new Map();
+      sym.paramSyms.forEach((p, i) => map.set(p, args[i].locals));
+      const saved = this.inlineMap;
+      this.inlineMap = map;
+      this.inlineStack.push(sym);
+      this.comment(`inlined ${sym.name}`);
+      this.expr(sym.decl.body.body[0].value);
+      this.inlineStack.pop();
+      this.inlineMap = saved;
+    } else {
+      for (const a of args) for (const l of a.locals) this.emit('local.get', l);
+      this.emit('call', sym);
+    }
+    for (const a of args) this.release(...a.temps);
+  }
+
+  /** Evaluate argument expressions left to right and call `sym`, inlining when worthwhile. */
+  callExprs(sym, exprs) {
+    if (!this.inlineable(sym)) {
+      for (const a of exprs) this.expr(a);
+      this.emit('call', sym);
+      return;
+    }
+    this.callWith(sym, exprs.map((a, i) => this.materialize(a, exprs.slice(i + 1))));
+  }
+
   /** A call to an operator defined in an impl, possibly derived (swapped and/or negated). */
   userOperator(e) {
     const { sym, swap, negate } = e.opMethod;
     if (!swap) {
-      this.expr(e.left);
-      this.expr(e.right);
+      this.callExprs(sym, [e.left, e.right]);
     } else {
       // Evaluate left to right, then pass the operands the other way round.
-      const A = this.materialize(e.left);
+      const A = this.materialize(e.left, [e.right]);
       const B = this.materialize(e.right);
-      for (const l of B.locals) this.emit('local.get', l);
-      for (const l of A.locals) this.emit('local.get', l);
-      this.release(...A.temps, ...B.temps);
+      this.callWith(sym, [B, A]);
     }
-    this.emit('call', sym);
     if (negate) this.emit('i32.eqz');
   }
 
@@ -1086,8 +1148,7 @@ class FnGen {
       return;
     }
     if (e.sym) {
-      for (const a of e.args) this.expr(a);
-      this.emit('call', e.sym);
+      this.callExprs(e.sym, e.args);
       return;
     }
     switch (e.builtin) {
@@ -1130,14 +1191,11 @@ class FnGen {
   methodCall(e) {
     const m = e.method;
     if (e.isStatic) {
-      for (const a of e.args) this.expr(a);
-      this.emit('call', m);
+      this.callExprs(m, e.args);
       return;
     }
     if (m.selfMode !== 'var') {
-      this.expr(e.receiver);
-      for (const a of e.args) this.expr(a);
-      this.emit('call', m);
+      this.callExprs(m, [e.receiver, ...e.args]);
       return;
     }
     // var self: copy the receiver in, call, and store the updated copy back.
