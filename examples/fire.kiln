@@ -1,0 +1,74 @@
+// Fire: heat rises from the bottom row and cools as it climbs.
+// The word KILN is stamped into the heat map, so it burns.
+// Move the mouse (button held) to add more fuel.
+
+const N = WIDTH * HEIGHT;
+var heat: [int; N];
+var palette: [int; 64];
+
+// A tiny xorshift random number generator, all integer math.
+var seed = 2463534242;
+fn rnd() -> int {
+  seed ^= seed << 13;
+  seed ^= seed >>> 17;
+  seed ^= seed << 5;
+  return seed >>> 1;
+}
+
+fn main() {
+  // black -> red -> orange -> yellow -> white
+  for i in 0..64 {
+    let t = i as float / 63.0;
+    palette[i] = rgbf(clamp(t * 3.0, 0.0, 1.0),
+                      clamp(t * 3.0 - 1.0, 0.0, 1.0),
+                      clamp(t * 3.0 - 2.0, 0.0, 1.0));
+  }
+}
+
+fn frame(t: float) {
+  // Fuel: the bottom row burns (with a little flicker).
+  for x in 0..WIDTH {
+    heat[(HEIGHT - 1) * WIDTH + x] = 34 + rnd() % 12;
+  }
+
+  // Stamp the word into the heat map by drawing it and reading it back.
+  clear(0);
+  text_big(70, 150, "KILN", 15, 1);
+  for i in 0..N {
+    if screen[i] == 1 && rnd() % 3 == 0 { heat[i] = 63; }
+  }
+
+  if mouse_down() {
+    let mx = mouse_x();
+    let my = mouse_y();
+    for dy in -6..=6 {
+      for dx in -6..=6 {
+        let x = mx + dx;
+        let y = my + dy;
+        if x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT { heat[y * WIDTH + x] = 63; }
+      }
+    }
+  }
+
+  // Spread the heat upward: each cell pushes its heat into the row above,
+  // drifting sideways a little and cooling by a random amount.
+  for x in 0..WIDTH {
+    for y in 1..HEIGHT {
+      let src = y * WIDTH + x;
+      let h = heat[src];
+      if h == 0 {
+        heat[src - WIDTH] = 0;
+      } else {
+        let r = rnd();
+        let drift = (r & 3) - 1;            // -1, 0, 1 or 2 pixels sideways
+        let cooling = ((r >> 2) & 1) + ((r >> 3) & 1);
+        let dst = clamp(src - WIDTH - drift, 0, N - 1);
+        heat[dst] = max(h - cooling, 0);
+      }
+    }
+  }
+
+  for i in 0..N {
+    screen[i] = palette[clamp(heat[i], 0, 63)];
+  }
+}

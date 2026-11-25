@@ -1,0 +1,118 @@
+// Ray marching: a 3D scene described entirely by distance functions.
+// No triangles and no GPU, just vector math compiled to WebAssembly.
+// Vec3 is an ordinary struct; +, -, * and / work on it component-wise.
+// Rendered at half resolution (2x2 pixels) to keep it smooth.
+
+struct Vec3 { x: float, y: float, z: float }
+
+fn dot(a: Vec3, b: Vec3) -> float { return a.x * b.x + a.y * b.y + a.z * b.z; }
+fn length(v: Vec3) -> float { return sqrt(dot(v, v)); }
+fn normalize(v: Vec3) -> Vec3 { return v / length(v); }
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+  return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+const SUN = Vec3(0.577, 0.577, -0.577);   // unit vector toward the light
+const UP = Vec3(0.0, 1.0, 0.0);
+var time = 0.0;
+
+// Smooth minimum: blends two shapes together where they meet.
+fn smin(a: float, b: float, k: float) -> float {
+  let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+fn blob(p: Vec3) -> float {
+  let sphere = length(p - Vec3(0.0, 0.25 * sin(time * 2.0), 0.0)) - 0.75;
+  // A torus tumbling around the sphere: rotate p about the x axis.
+  let c = cos(time);
+  let s = sin(time);
+  let q = Vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+  let around = sqrt(q.x * q.x + q.z * q.z) - 1.35;
+  let ring = sqrt(around * around + q.y * q.y) - 0.18;
+  return smin(sphere, ring, 0.35);
+}
+
+// Distance from p to the nearest surface: the floor or the blob.
+fn scene(p: Vec3) -> float {
+  return min(p.y + 1.0, blob(p));
+}
+
+// Surface normal from four samples (the tetrahedron technique).
+fn normal(p: Vec3) -> Vec3 {
+  let e = 0.001;
+  let a = scene(p + Vec3(e, -e, -e));
+  let b = scene(p + Vec3(-e, -e, e));
+  let c = scene(p + Vec3(-e, e, -e));
+  let d = scene(p + Vec3(e, e, e));
+  return normalize(Vec3(a - b - c + d, -a - b + c + d, -a + b - c + d));
+}
+
+// March toward the light; the closest miss gives a soft shadow edge.
+fn shadow(p: Vec3) -> float {
+  var res = 1.0;
+  var d = 0.05;
+  for i in 0..32 {
+    let h = scene(p + SUN * d);
+    res = min(res, 8.0 * h / d);
+    d += clamp(h, 0.02, 0.4);
+    if res < 0.01 || d > 6.0 { break; }
+  }
+  return clamp(res, 0.0, 1.0);
+}
+
+fn sky(dir: Vec3) -> Vec3 {
+  return Vec3(0.30, 0.48, 0.90) - Vec3(0.25, 0.30, 0.20) * dir.y;
+}
+
+fn shade(eye: Vec3, dir: Vec3) -> Vec3 {
+  var d = 0.0;
+  var hit = false;
+  for i in 0..80 {
+    let h = scene(eye + dir * d);
+    if h < 0.001 { hit = true; break; }
+    d += h;
+    if d > 25.0 { break; }
+  }
+  if !hit { return sky(dir); }
+
+  let p = eye + dir * d;
+  let n = normal(p);
+  var albedo = Vec3(0.95, 0.35 + 0.25 * (0.5 + 0.5 * sin(p.y * 4.0 + time * 2.0)), 0.25);
+  if p.y < -0.999 {
+    let check = ((floor(p.x) + floor(p.z)) as int) & 1;
+    albedo = check == 0 ? Vec3(0.85, 0.85, 0.9) : Vec3(0.35, 0.35, 0.37);
+  }
+
+  let diffuse = max(dot(n, SUN), 0.0) * shadow(p + n * 0.01);
+  let light = diffuse * 0.9 + 0.25 + 0.15 * n.y;
+  let spec = pow(max(dot(n, normalize(SUN - dir)), 0.0), 40.0) * diffuse;
+  let fog = 1.0 - exp(-0.0025 * d * d);
+  let lit = albedo * light + spec;
+  return lit + (sky(dir) - lit) * fog;
+}
+
+fn to_color(c: Vec3) -> int {
+  // sqrt is a cheap gamma correction
+  return rgbf(sqrt(clamp(c.x, 0.0, 1.0)), sqrt(clamp(c.y, 0.0, 1.0)), sqrt(clamp(c.z, 0.0, 1.0)));
+}
+
+fn frame(t: float) {
+  time = t;
+  // Orbit the camera around the origin, looking at it.
+  let angle = t * 0.25;
+  let eye = Vec3(4.2 * sin(angle), 1.1, -4.2 * cos(angle));
+  let forward = normalize(-eye);
+  let right = normalize(cross(UP, forward));
+  let up = cross(forward, right);
+
+  let aspect = WIDTH as float / HEIGHT as float;
+  for py in 0..HEIGHT / 2 {
+    let v = 1.0 - py as float / (HEIGHT / 4) as float;
+    for px in 0..WIDTH / 2 {
+      let u = (px as float / (WIDTH / 4) as float - 1.0) * aspect;
+      let dir = normalize(forward + right * (u * 0.75) + up * (v * 0.75));
+      rect(px * 2, py * 2, 2, 2, to_color(shade(eye, dir)));
+    }
+  }
+}

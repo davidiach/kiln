@@ -1,0 +1,72 @@
+// Particle fountain: 4000 particles with gravity, bouncing off the floor.
+// The fountain follows your mouse. The screen fades a little every frame
+// instead of being cleared, which leaves glowing trails.
+//
+// Each particle is a struct in an array. The update loop copies one into a
+// local, changes it, and writes it back: structs are plain values.
+
+struct Vec2 { x: float, y: float }
+struct Particle { pos: Vec2, vel: Vec2, life: float, color: int }
+
+const N = 4000;
+const GRAVITY = Vec2(0.0, 260.0);
+var parts: [Particle; N];
+var next = 0;
+var last_t = 0.0;
+var emitter = Vec2(160.0, 200.0);
+
+// Add two colors channel by channel, saturating at 255: light adds up.
+fn add(a: int, b: int) -> int {
+  let r = min(((a >> 16) & 255) + ((b >> 16) & 255), 255);
+  let g = min(((a >> 8) & 255) + ((b >> 8) & 255), 255);
+  let bl = min((a & 255) + (b & 255), 255);
+  return (r << 16) | (g << 8) | bl;
+}
+
+fn spawn(t: float) {
+  let angle = -PI / 2.0 + (rand() - 0.5) * 0.7;
+  let speed = 140.0 + rand() * 90.0;
+  let vel = Vec2(cos(angle), sin(angle)) * speed;
+  parts[next] = Particle(emitter, vel, 1.0, hsv(t * 0.08 + rand() * 0.15, 0.75, 0.7));
+  next = (next + 1) % N;
+}
+
+fn frame(t: float) {
+  let dt = clamp(t - last_t, 0.0, 0.05);
+  last_t = t;
+
+  // Fade everything to 3/4 brightness.
+  for i in 0..WIDTH * HEIGHT {
+    let c = screen[i];
+    screen[i] = ((c >> 1) & 0x7f7f7f) + ((c >> 2) & 0x3f3f3f);
+  }
+
+  // The emitter eases toward the mouse.
+  let target = Vec2(mouse_x() as float, clamp(mouse_y() as float, 40.0, 235.0));
+  emitter += (target - emitter) * 0.15;
+  for k in 0..40 { spawn(t); }
+
+  let floor_y = HEIGHT as float - 1.0;
+  for i in 0..N {
+    if parts[i].life <= 0.0 { continue; }
+    var p = parts[i];
+    p.vel += GRAVITY * dt;
+    p.pos += p.vel * dt;
+    if p.pos.y > floor_y {
+      p.pos.y = floor_y;
+      p.vel.y *= -0.55;
+      p.vel.x *= 0.8;
+    }
+    if p.pos.x < 0.0 || p.pos.x >= WIDTH as float { p.vel.x = -p.vel.x; }
+    p.life -= dt * 0.35;
+    parts[i] = p;
+
+    let x = p.pos.x as int;
+    let y = p.pos.y as int;
+    if x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT {
+      let k = y * WIDTH + x;
+      screen[k] = add(screen[k], p.color);
+    }
+  }
+  text(4, 4, "MOVE THE MOUSE", 0x808080);
+}

@@ -1,0 +1,62 @@
+// Conway's Game of Life on a wrapping 160 x 120 grid.
+// Hold the mouse button to draw live cells. Press SPACE for a fresh soup.
+// Dead cells leave glowing trails that fade out.
+
+const W = WIDTH / 2;
+const H = HEIGHT / 2;
+const N = W * H;
+
+var cells: [bool; N];
+var next: [bool; N];
+var heat: [float; N];
+
+fn alive(x: int, y: int) -> int {
+  // wrap around the edges
+  let xx = (x + W) % W;
+  let yy = (y + H) % H;
+  return cells[yy * W + xx] ? 1 : 0;
+}
+
+fn seed() {
+  for i in 0..N {
+    cells[i] = rand() < 0.22;
+  }
+}
+
+fn main() {
+  seed();
+}
+
+fn frame(t: float) {
+  if key_down(KEY_SPACE) { seed(); }
+
+  if mouse_down() {
+    let mx = mouse_x() / 2;
+    let my = mouse_y() / 2;
+    for dy in -2..=2 {
+      for dx in -2..=2 {
+        if rand() < 0.5 {
+          cells[((my + dy + H) % H) * W + (mx + dx + W) % W] = true;
+        }
+      }
+    }
+  }
+
+  for y in 0..H {
+    for x in 0..W {
+      let n = alive(x - 1, y - 1) + alive(x, y - 1) + alive(x + 1, y - 1)
+            + alive(x - 1, y)                       + alive(x + 1, y)
+            + alive(x - 1, y + 1) + alive(x, y + 1) + alive(x + 1, y + 1);
+      let i = y * W + x;
+      next[i] = n == 3 || (n == 2 && cells[i]);
+    }
+  }
+
+  for i in 0..N {
+    cells[i] = next[i];
+    heat[i] = cells[i] ? 1.0 : heat[i] * 0.86;
+    let h = heat[i];
+    let color = cells[i] ? 0xfff4d0 : hsv(0.62 - h * 0.55, 0.9, h * 0.9);
+    rect((i % W) * 2, (i / W) * 2, 2, 2, color);
+  }
+}
