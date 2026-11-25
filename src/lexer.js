@@ -7,7 +7,7 @@ import { CompileError } from './errors.js';
 
 export const KEYWORDS = new Set([
   'fn', 'let', 'var', 'const', 'if', 'else', 'while', 'for', 'in',
-  'break', 'continue', 'return', 'true', 'false', 'as', 'export', 'struct',
+  'break', 'continue', 'return', 'true', 'false', 'as', 'export', 'struct', 'impl',
 ]);
 
 // Longest first, so that '>>>=' wins over '>>>' wins over '>>' wins over '>'.

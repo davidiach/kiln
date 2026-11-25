@@ -38,7 +38,7 @@ function trapMessage(site, value) {
 export function explainError(e) {
   if (e instanceof KilnRuntimeError) return e;
   const msg = String(e?.message ?? e);
-  const fn = /at (\w+) \(wasm:/.exec(e?.stack ?? '')?.[1];
+  const fn = /at ([\w.]+) \(wasm:/.exec(e?.stack ?? '')?.[1];
   const inFn = fn ? ` in '${fn}'` : '';
   if (e instanceof RangeError && /call stack/i.test(msg)) {
     return new KilnRuntimeError(`stack overflow${inFn}: is there a recursion that never stops?`);
