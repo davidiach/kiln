@@ -292,7 +292,8 @@ class Generator {
         body.raw(fg.code.bytes);
         body.u8(0x0b);
         w.sized(body);
-        fg.codeStart = w.length - fg.code.length - 1; // within the section's contents
+        fg.bodyStart = w.length - body.length; // within the section's contents
+        fg.codeStart = w.length - fg.code.length - 1;
       }),
     );
     if (this.segments.length) {
@@ -324,7 +325,13 @@ class Generator {
 
     const binary = mod.toUint8Array();
     const codeAt = sections.find((x) => x.name === 'code').contentStart;
-    const positions = bodies.flatMap((fg) => fg.pos.map(([off, sp]) => [codeAt + fg.codeStart + off, sp.origin, sp.line, sp.col]));
+    // Each function starts with an unmapped entry (origin null), so the bytes
+    // before its first instruction (an engine reports a stack overflow
+    // there) never borrow the previous function's last line.
+    const positions = bodies.flatMap((fg) => [
+      [codeAt + fg.bodyStart, null, 0, 0],
+      ...fg.pos.map(([off, sp]) => [codeAt + fg.codeStart + off, sp.origin, sp.line, sp.col, sp.fn]),
+    ]);
     const wat = this.wat(bodies, exports, allGlobals, pages);
     return {
       binary,
@@ -355,15 +362,21 @@ class Generator {
 
   /**
    * A version 3 source map. For WebAssembly, the "column" is the byte offset
-   * of an instruction in the module, and every mapping is on line 1.
+   * of an instruction in the module, and every mapping is on line 1. An
+   * unmapped position becomes a one-field segment (an offset with no source).
    */
   sourceMap(positions) {
     const origins = ['user', 'prelude'];
     let segs = '';
     let prev = [0, 0, 0, 0];
     for (const [offset, origin, line, col] of positions) {
-      const cur = [offset, origins.indexOf(origin), line - 1, col - 1];
       if (segs) segs += ',';
+      if (origin === null) {
+        segs += vlq(offset - prev[0]);
+        prev = [offset, ...prev.slice(1)];
+        continue;
+      }
+      const cur = [offset, origins.indexOf(origin), line - 1, col - 1];
       segs += cur.map((v, i) => vlq(v - prev[i])).join('');
       prev = cur;
     }
@@ -991,7 +1004,7 @@ class FnGen {
     // Instructions belong to the innermost statement; after a nested one,
     // the rest of this statement's code (a loop's increment) is this one's.
     const outer = this.span;
-    if (s.kind !== 'Block') this.span = { origin: this.sym.origin, line: s.span.line, col: s.span.col };
+    if (s.kind !== 'Block') this.span = { origin: this.sym.origin, line: s.span.line, col: s.span.col, fn: this.sym.name };
     try {
       this.stmtCode(s);
     } finally {
@@ -1361,7 +1374,7 @@ class FnGen {
       // Inlined code keeps its own position, so a debugger steps into it.
       const ret = sym.decl.body.body[0];
       const outer = this.span;
-      this.span = { origin: sym.origin, line: ret.span.line, col: ret.span.col };
+      this.span = { origin: sym.origin, line: ret.span.line, col: ret.span.col, fn: sym.name };
       this.expr(ret.value);
       this.span = outer;
       this.inlineStack.pop();

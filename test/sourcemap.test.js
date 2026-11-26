@@ -29,7 +29,9 @@ function decode(mappings) {
       }
     }
     fields.forEach((f, i) => (state[i] += f));
-    out.push({ offset: state[0], source: state[1], line: state[2] + 1, col: state[3] + 1 });
+    // A one-field segment maps its offset to nothing.
+    if (fields.length === 1) out.push({ offset: state[0], unmapped: true });
+    else out.push({ offset: state[0], source: state[1], line: state[2] + 1, col: state[3] + 1 });
   }
   return out;
 }
@@ -134,6 +136,43 @@ test('a stack overflow names the line of the call that recursed', async () => {
     assert.equal(e.line, 3, 'the editor can mark the line');
     return true;
   });
+});
+
+// Regression from review on PR #9: an overflow is reported at a function's
+// entry, which used to borrow the last line of whatever function came before.
+test('mutual recursion names the call that recursed, never a line of an unrelated function', async () => {
+  const src = [
+    'fn a(n: int) -> int {',
+    '  return b(n + 1) + 1;', // 2
+    '}',
+    'export fn other() {',
+    '  print(42);', // 5: the function just before b
+    '}',
+    'fn b(n: int) -> int {',
+    '  if n < 0 { return 0; }',
+    '  return a(n + 1) + 2;', // 9
+    '}',
+    'fn main() {',
+    '  print(a(0));',
+    '}',
+  ].join('\n');
+  for (const inline of [true, false]) {
+    const inst = await instantiate(compile(src, { inline }), { print: () => {} });
+    assert.throws(() => inst.main(), (e) => {
+      // a's call to b (line 2) or b's call to a (line 9), named after the right function
+      assert.match(e.message, /stack overflow in '(a' \(line 2|b' \(line 9)\)/, `inline: ${inline}: ${e.message}`);
+      assert.notEqual(e.line, 5);
+      return true;
+    });
+  }
+});
+
+test('every function in the module starts unmapped', () => {
+  const r = compile('fn f(x: int) -> int {\n  print(x);\n  return x;\n}\nfn main() {\n  print(f(1) + f(2));\n}\n', { inline: false });
+  const maps = decode(r.sourceMap.mappings);
+  const functions = (r.wat.match(/^ {2}\(func /gm) || []).length;
+  assert.equal(maps.filter((m) => m.unmapped).length, functions);
+  assert.ok(maps[0].unmapped, 'the first function starts unmapped too');
 });
 
 test('kiln build writes the map next to the binary and points the binary at it', () => {

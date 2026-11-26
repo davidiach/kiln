@@ -46,7 +46,10 @@ function trapMessage(site, value) {
 
 /**
  * The Kiln position of a byte offset in the module, from the compiler's
- * position table ([offset, origin, line, col], sorted by offset).
+ * position table ([offset, origin, line, col, function], sorted by offset;
+ * for inlined code, the function is the one it was inlined from), or null
+ * where nothing maps (origin null: a function's start, before its first
+ * instruction).
  */
 export function positionAt(positions, offset) {
   let lo = 0;
@@ -61,7 +64,7 @@ export function positionAt(positions, offset) {
       hi = mid - 1;
     }
   }
-  return found && { origin: found[1], line: found[2], col: found[3] };
+  return found && found[1] !== null ? { origin: found[1], line: found[2], col: found[3], fn: found[4] } : null;
 }
 
 /** The wasm frames of an engine error's stack, innermost first: { fn, offset }. */
@@ -72,17 +75,17 @@ function wasmFrames(e) {
 /**
  * Translate engine errors (stack overflow, wasm traps) into friendlier
  * messages. With the compiler's `positions`, the error also gets the line of
- * the innermost frame in the user's program: for a stack overflow, the call
- * that recursed rather than the function entry where the engine noticed.
+ * the innermost frame in the user's program. A stack overflow is reported at
+ * a function's entry, which maps to nothing, so its line is the call that
+ * recursed, one frame out (also for mutual recursion).
  */
 export function explainError(e, positions = null) {
   if (e instanceof KilnRuntimeError) return e;
   const msg = String(e?.message ?? e);
   const overflow = e instanceof RangeError && /call stack/i.test(msg);
-  let frames = wasmFrames(e);
-  if (overflow && frames.length > 1 && frames[1].fn === frames[0].fn) frames = frames.slice(1);
+  const frames = wasmFrames(e);
   const at = positions && frames.map((f) => ({ ...f, pos: positionAt(positions, f.offset) })).find((f) => f.pos?.origin === 'user');
-  const fn = at?.fn ?? frames[0]?.fn;
+  const fn = at?.pos.fn ?? at?.fn ?? frames[0]?.fn; // the Kiln function, even if it was inlined
   const where = `${fn ? ` in '${fn}'` : ''}${at ? ` (line ${at.pos.line})` : ''}`;
   const site = at ? { origin: 'user', line: at.pos.line, col: at.pos.col } : undefined;
   if (overflow) return new KilnRuntimeError(`stack overflow${where}: is there a recursion that never stops?`, site);
