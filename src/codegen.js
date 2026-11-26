@@ -32,6 +32,21 @@ function mayMutate(e) {
 }
 const align = (n, a) => Math.ceil(n / a) * a;
 
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Base64 VLQ, as source map mappings use: sign in the lowest bit, 5 bits per digit. */
+function vlq(n) {
+  let v = n < 0 ? (-n << 1) | 1 : n << 1;
+  let out = '';
+  do {
+    let digit = v & 31;
+    v >>>= 5;
+    if (v) digit |= 32;
+    out += BASE64[digit];
+  } while (v);
+  return out;
+}
+
 const CHILDREN = ['left', 'right', 'operand', 'expr', 'cond', 'then', 'else', 'target', 'index', 'receiver', 'init', 'value', 'start', 'end', 'body', 'args'];
 
 /** The local variables a statement or expression mentions (reads or writes), anywhere inside it. */
@@ -97,6 +112,8 @@ class Generator {
     this.ck = ck;
     this.inline = options.inline !== false;
     this.sources = Object.fromEntries(Object.entries(sources).map(([k, v]) => [k, v.split('\n')]));
+    this.sourceText = sources;
+    this.fileNames = { user: options.filename ?? 'program.kiln', prelude: 'prelude.kiln' };
     this.traps = [];
     this.strings = new Map();
     this.segments = [];
@@ -232,7 +249,7 @@ class Generator {
       build(body);
       const start = mod.length;
       mod.u8(id).sized(body);
-      sections.push({ name, start, end: mod.length });
+      sections.push({ name, start, end: mod.length, contentStart: mod.length - body.length });
     };
 
     section(SECTION.type, 'type', (w) =>
@@ -275,6 +292,8 @@ class Generator {
         body.raw(fg.code.bytes);
         body.u8(0x0b);
         w.sized(body);
+        fg.bodyStart = w.length - body.length; // within the section's contents
+        fg.codeStart = w.length - fg.code.length - 1;
       }),
     );
     if (this.segments.length) {
@@ -305,11 +324,21 @@ class Generator {
     }
 
     const binary = mod.toUint8Array();
+    const codeAt = sections.find((x) => x.name === 'code').contentStart;
+    // Each function starts with an unmapped entry (origin null), so the bytes
+    // before its first instruction (an engine reports a stack overflow
+    // there) never borrow the previous function's last line.
+    const positions = bodies.flatMap((fg) => [
+      [codeAt + fg.bodyStart, null, 0, 0],
+      ...fg.pos.map(([off, sp]) => [codeAt + fg.codeStart + off, sp.origin, sp.line, sp.col, sp.fn]),
+    ]);
     const wat = this.wat(bodies, exports, allGlobals, pages);
     return {
       binary,
       wat,
       sections,
+      positions,
+      sourceMap: this.sourceMap(positions),
       traps: this.traps,
       hasScreen: !!screen,
       stats: {
@@ -329,6 +358,35 @@ class Generator {
       fg.generate();
       return fg;
     });
+  }
+
+  /**
+   * A version 3 source map. For WebAssembly, the "column" is the byte offset
+   * of an instruction in the module, and every mapping is on line 1. An
+   * unmapped position becomes a one-field segment (an offset with no source).
+   */
+  sourceMap(positions) {
+    const origins = ['user', 'prelude'];
+    let segs = '';
+    let prev = [0, 0, 0, 0];
+    for (const [offset, origin, line, col] of positions) {
+      if (segs) segs += ',';
+      if (origin === null) {
+        segs += vlq(offset - prev[0]);
+        prev = [offset, ...prev.slice(1)];
+        continue;
+      }
+      const cur = [offset, origins.indexOf(origin), line - 1, col - 1];
+      segs += cur.map((v, i) => vlq(v - prev[i])).join('');
+      prev = cur;
+    }
+    return {
+      version: 3,
+      sources: origins.map((o) => this.fileNames[o]),
+      sourcesContent: origins.map((o) => this.sourceText[o]),
+      names: [],
+      mappings: segs,
+    };
   }
 
   typeIndex(params, results) {
@@ -465,6 +523,11 @@ class FnGen {
     this.inlineStack = [];
     this.called = new Set(); // functions this body actually calls
     this.inlinedNodes = 0;
+    // For the source map: [offset in this.code, position] whenever the
+    // position changes. `span` is the statement being compiled (or, inside
+    // an inlined call, the inlined function's return statement).
+    this.pos = [];
+    this.span = null;
   }
 
   generate() {
@@ -521,6 +584,7 @@ class FnGen {
       this.prev = null;
       return;
     }
+    if (this.span && this.span !== this.pos[this.pos.length - 1]?.[1]) this.pos.push([this.code.length, this.span]);
     this.prev = { name, arg: args[0], pos: this.code.length, line: this.lines.length };
     if (name === 'call' && !this.gen.imports.includes(args[0])) {
       // Calls are only ever emitted to functions that are in the module.
@@ -937,6 +1001,18 @@ class FnGen {
   }
 
   stmt(s) {
+    // Instructions belong to the innermost statement; after a nested one,
+    // the rest of this statement's code (a loop's increment) is this one's.
+    const outer = this.span;
+    if (s.kind !== 'Block') this.span = { origin: this.sym.origin, line: s.span.line, col: s.span.col, fn: this.sym.name };
+    try {
+      this.stmtCode(s);
+    } finally {
+      this.span = outer;
+    }
+  }
+
+  stmtCode(s) {
     if (s.kind !== 'Block') this.lineComment(s.span);
     switch (s.kind) {
       case 'Let': {
@@ -1295,7 +1371,12 @@ class FnGen {
       this.inlineStack.push(sym);
       this.inlinedNodes += sym.inlineSize;
       this.comment(`inlined ${sym.name}`);
-      this.expr(sym.decl.body.body[0].value);
+      // Inlined code keeps its own position, so a debugger steps into it.
+      const ret = sym.decl.body.body[0];
+      const outer = this.span;
+      this.span = { origin: sym.origin, line: ret.span.line, col: ret.span.col, fn: sym.name };
+      this.expr(ret.value);
+      this.span = outer;
       this.inlineStack.pop();
       this.inlineMap = saved;
     } else {

@@ -44,19 +44,55 @@ function trapMessage(site, value) {
   return `trap${where}`;
 }
 
-/** Translate engine errors (stack overflow, wasm traps) into friendlier messages. */
-export function explainError(e) {
+/**
+ * The Kiln position of a byte offset in the module, from the compiler's
+ * position table ([offset, origin, line, col, function], sorted by offset;
+ * for inlined code, the function is the one it was inlined from), or null
+ * where nothing maps (origin null: a function's start, before its first
+ * instruction).
+ */
+export function positionAt(positions, offset) {
+  let lo = 0;
+  let hi = positions.length - 1;
+  let found = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (positions[mid][0] <= offset) {
+      found = positions[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found && found[1] !== null ? { origin: found[1], line: found[2], col: found[3], fn: found[4] } : null;
+}
+
+/** The wasm frames of an engine error's stack, innermost first: { fn, offset }. */
+function wasmFrames(e) {
+  return [...String(e?.stack ?? '').matchAll(/at (\S+) \(wasm:\/\/[^)]*:0x([0-9a-f]+)\)/g)].map((m) => ({ fn: m[1], offset: parseInt(m[2], 16) }));
+}
+
+/**
+ * Translate engine errors (stack overflow, wasm traps) into friendlier
+ * messages. With the compiler's `positions`, the error also gets the line of
+ * the innermost frame in the user's program. A stack overflow is reported at
+ * a function's entry, which maps to nothing, so its line is the call that
+ * recursed, one frame out (also for mutual recursion).
+ */
+export function explainError(e, positions = null) {
   if (e instanceof KilnRuntimeError) return e;
   const msg = String(e?.message ?? e);
-  const fn = /at ([\w.]+) \(wasm:/.exec(e?.stack ?? '')?.[1];
-  const inFn = fn ? ` in '${fn}'` : '';
-  if (e instanceof RangeError && /call stack/i.test(msg)) {
-    return new KilnRuntimeError(`stack overflow${inFn}: is there a recursion that never stops?`);
-  }
-  if (/integer overflow/i.test(msg)) return new KilnRuntimeError(`integer overflow in division${inFn}`);
-  if (/unreachable/i.test(msg)) return new KilnRuntimeError(`reached unreachable code${inFn}`);
-  if (/divide by zero/i.test(msg)) return new KilnRuntimeError(`division by zero${inFn}`);
-  return new KilnRuntimeError(`${msg}${inFn}`);
+  const overflow = e instanceof RangeError && /call stack/i.test(msg);
+  const frames = wasmFrames(e);
+  const at = positions && frames.map((f) => ({ ...f, pos: positionAt(positions, f.offset) })).find((f) => f.pos?.origin === 'user');
+  const fn = at?.pos.fn ?? at?.fn ?? frames[0]?.fn; // the Kiln function, even if it was inlined
+  const where = `${fn ? ` in '${fn}'` : ''}${at ? ` (line ${at.pos.line})` : ''}`;
+  const site = at ? { origin: 'user', line: at.pos.line, col: at.pos.col } : undefined;
+  if (overflow) return new KilnRuntimeError(`stack overflow${where}: is there a recursion that never stops?`, site);
+  if (/integer overflow/i.test(msg)) return new KilnRuntimeError(`integer overflow in division${where}`, site);
+  if (/unreachable/i.test(msg)) return new KilnRuntimeError(`reached unreachable code${where}`, site);
+  if (/divide by zero/i.test(msg)) return new KilnRuntimeError(`division by zero${where}`, site);
+  return new KilnRuntimeError(`${msg}${where}`, site);
 }
 
 const decoder = new TextDecoder();
@@ -138,6 +174,7 @@ export class KilnInstance {
     this.input = input;
     this.width = compiled.width;
     this.height = compiled.height;
+    this.positions = compiled.positions ?? null;
     this.hasMain = typeof this.exports.main === 'function';
     this.hasFrame = typeof this.exports.frame === 'function';
     this.hasScreen = this.exports.__screen !== undefined;
@@ -147,7 +184,7 @@ export class KilnInstance {
     try {
       return f();
     } catch (e) {
-      throw explainError(e);
+      throw explainError(e, this.positions);
     }
   }
 

@@ -3,7 +3,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { compile, formatError } from '../src/compiler.js';
+import { compile, formatError, withSourceMapURL } from '../src/compiler.js';
 import { instantiate } from '../src/runtime.js';
 import { encodePNG } from '../src/png.js';
 import { renderSounds, encodeWav } from '../src/synth.js';
@@ -13,7 +13,7 @@ const USAGE = `kiln: a tiny language that compiles to WebAssembly
 usage:
   kiln run <file.kiln> [--frames N]      compile and run main() (and N frames)
   kiln check <file.kiln>                 type-check only
-  kiln build <file.kiln> [-o out.wasm]   write the WebAssembly binary
+  kiln build <file.kiln> [-o out.wasm]   write the WebAssembly binary and its source map (out.wasm.map)
   kiln wat <file.kiln>                   print the generated WebAssembly text
   kiln render <file.kiln> [-t secs] [-o out.png] [--scale N]
                                          run headless and save the screen as PNG
@@ -34,7 +34,7 @@ function load(file) {
     console.error(`kiln: can't read '${file}'`);
     process.exit(2);
   }
-  const result = compile(source);
+  const result = compile(source, { filename: basename(file) });
   if (!result.ok) {
     for (const e of result.errors) console.error(formatError(e, source, file) + '\n');
     console.error(`kiln: ${result.errors.length} error${result.errors.length === 1 ? '' : 's'}`);
@@ -58,8 +58,10 @@ async function main(argv) {
         break;
       case 'build': {
         const out = arg(rest, '-o', `${stem}.wasm`);
-        writeFileSync(out, result.binary);
-        console.log(`wrote ${out} (${result.binary.length} bytes)`);
+        // The map sits next to the binary, which refers to it by name.
+        writeFileSync(`${out}.map`, JSON.stringify(result.sourceMap));
+        writeFileSync(out, withSourceMapURL(result.binary, `${basename(out)}.map`));
+        console.log(`wrote ${out} (${result.binary.length} bytes) and ${out}.map`);
         break;
       }
       case 'wat':

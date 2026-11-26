@@ -10,6 +10,7 @@ import { check } from './checker.js';
 import { generate } from './codegen.js';
 import { CompileError, formatError } from './errors.js';
 import { PRELUDE, WIDTH, HEIGHT } from './prelude.js';
+import { ByteWriter } from './wasm.js';
 
 export { formatError, CompileError, PRELUDE, WIDTH, HEIGHT, lex };
 
@@ -20,6 +21,10 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 /**
  * options.inline (default true): expand calls to small single-expression
  * functions, methods and operators at the call site.
+ * options.filename: the program's name in the source map (default program.kiln).
+ *
+ * The result's `sourceMap` maps every instruction back to its Kiln line; see
+ * withSourceMapURL() to point a binary at it.
  */
 export function compile(source, options = {}) {
   const t0 = now();
@@ -53,4 +58,26 @@ export function compile(source, options = {}) {
     if (e instanceof CompileError) return { ok: false, errors: [e], time: now() - t0 };
     throw e;
   }
+}
+
+/**
+ * The binary with a "sourceMappingURL" custom section appended, so browser
+ * devtools can show and step through the Kiln source. The section goes at
+ * the end, so the code's byte offsets (which the map refers to) don't move.
+ */
+export function withSourceMapURL(binary, url) {
+  const content = new ByteWriter().name('sourceMappingURL').name(url);
+  const section = new ByteWriter().u8(0).sized(content);
+  const out = new Uint8Array(binary.length + section.length);
+  out.set(binary);
+  out.set(section.bytes, binary.length);
+  return out;
+}
+
+/** A source map as a data: URL, so it travels inside the binary. */
+export function sourceMapDataURL(map) {
+  const bytes = new TextEncoder().encode(JSON.stringify(map));
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return `data:application/json;base64,${btoa(bin)}`;
 }

@@ -135,7 +135,8 @@ function doCompile() {
   const src = editor.value;
   let r;
   try {
-    r = compile(src);
+    // The name shows up in the source map, i.e. in the browser's devtools.
+    r = compile(src, { filename: $('#filename').textContent || 'program.kiln' });
   } catch (e) {
     r = { ok: false, errors: [{ message: `internal compiler error: ${e.message}`, span: { line: 1, col: 1, start: 0, end: 0 } }] };
     console.error(e);
