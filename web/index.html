@@ -123,6 +123,10 @@ sound(WAVE_SQUARE, 880.0, 1760.0, 0.1, 0.4);  // wave, from Hz, to Hz, seconds, 
 sound(WAVE_NOISE, 3000.0, 60.0, 0.6, 0.9);    // noise: an explosion
 sound_at(t + 0.5, WAVE_TRIANGLE, note(60), note(60), 0.3, 0.5);</pre>
         <p>Waves: <code>WAVE_SQUARE</code> <code>WAVE_TRIANGLE</code> <code>WAVE_SAW</code> <code>WAVE_SINE</code> <code>WAVE_NOISE</code>. The pitch slides from the first frequency to the second. <code>note(n)</code> turns a MIDI note number into Hz (60 is middle C). <code>sound_at</code> schedules on the same clock as <code>t</code> and <code>now()</code>, which keeps music in time. Browsers only allow sound after you click or press a key on the page.</p>
+        <pre>fn audio(t: float) -&gt; float {       // every sample, sample_rate() times a second
+  return 0.3 * sin(TAU * 440.0 * t);   // return -1 .. 1
+}</pre>
+        <p>Define <code>audio(t)</code> to compute the sound yourself, one sample at a time. It shares globals with <code>frame(t)</code>, so a frame can set a pitch that the audio plays. It runs about 120 ms ahead of the clock, and samples are clamped to -1..1. The synth example builds a four-voice synthesizer this way.</p>
         <h3>Control flow</h3>
         <pre>if a &lt; b { } else if c { } else { }
 while cond { break; continue; }
