@@ -59,7 +59,9 @@ export class Runner {
     this.ready = false;
     this.worker = this.spawn();
     this.setState('starting');
-    this.send({ type: 'start', t: this.now(), program: this.program, input: this.inputMessage() }, START_LIMIT_MS);
+    this.hasAudio = false;
+    this.sampleRate = this.audio?.sampleRate ?? 48000;
+    this.send({ type: 'start', t: this.now(), program: this.program, input: this.inputMessage(), sampleRate: this.sampleRate }, START_LIMIT_MS);
   }
 
   stop() {
@@ -134,6 +136,7 @@ export class Runner {
       this.stats.maxSounds = Math.max(this.stats.maxSounds, msg.sounds.length);
       this.audio?.play(msg.sounds, msg.t);
     }
+    if (msg.audio) this.audio?.stream(msg.audio);
     if (msg.pixels) {
       this.image.data.set(msg.pixels);
       this.ctx.putImageData(this.image, 0, 0);
@@ -141,9 +144,10 @@ export class Runner {
     if (msg.type === 'ready') {
       this.ready = true;
       this.hasFrame = msg.hasFrame;
+      this.hasAudio = msg.hasAudio; // audio(t) keeps a program running even without frame()
       if (!msg.hasScreen && !msg.hasFrame) this.clear();
-      this.setState(msg.hasFrame ? 'running' : 'done');
-      if (!msg.hasFrame) this.kill();
+      this.setState(msg.hasFrame || msg.hasAudio ? 'running' : 'done');
+      if (!msg.hasFrame && !msg.hasAudio) this.kill();
     } else if (msg.type === 'frame') {
       this.frames++;
     } else if (msg.type === 'error') {
@@ -180,7 +184,15 @@ export class Runner {
       this.fpsSince = now;
       if (this.state === 'running') this.onState?.({ state: 'running', fps: this.fps });
     }
-    if (this.worker && this.ready && this.hasFrame && !this.busy) {
+    if (this.worker && this.ready && this.hasAudio) {
+      // Sound was enabled after the start: from now on compute audio at the device's rate.
+      const rate = this.audio?.sampleRate;
+      if (rate && rate !== this.sampleRate) {
+        this.sampleRate = rate;
+        this.worker.postMessage({ type: 'rate', rate });
+      }
+    }
+    if (this.worker && this.ready && (this.hasFrame || this.hasAudio) && !this.busy) {
       this.send({ type: 'frame', t: this.now(), input: this.inputMessage() }, FRAME_LIMIT_MS);
     }
   }

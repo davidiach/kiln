@@ -52,6 +52,7 @@ class Checker {
     this.origin = 'user';
     this.main = null;
     this.frame = null;
+    this.audio = null;
   }
 
   err(msg, span, hint) {
@@ -485,8 +486,17 @@ class Checker {
       if (!ok) this.err("'frame' must look like: fn frame(t: float) { ... }", frame.decl.span, 't is the time in seconds since the program started');
       this.frame = frame;
     }
+    const audio = this.top.get('audio');
+    if (audio && audio.origin === 'user' && audio.kind === 'func') {
+      const ok = audio.ret === 'float' && audio.params.length === 1 && audio.params[0].type === 'float';
+      if (!ok) {
+        this.err("'audio' must look like: fn audio(t: float) -> float", audio.decl.span,
+          "it's called for every audio sample with the time in seconds, and returns the sample, from -1 to 1");
+      }
+      this.audio = audio;
+    }
     const exported = this.funcs.some((f) => f.exported);
-    if (!this.main && !this.frame && !exported && this.errors.length === 0) {
+    if (!this.main && !this.frame && !this.audio && !exported && this.errors.length === 0) {
       this.err('nothing to run: define fn main() or fn frame(t: float)', { start: 0, end: 1, line: 1, col: 1 },
         'main() runs once at startup; frame(t) runs every animation frame');
     }

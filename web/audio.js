@@ -1,10 +1,11 @@
 // Plays Kiln sound events through Web Audio.
 //
 // Programs run in a Web Worker, which can't use Web Audio, so they describe
-// sounds as events (see src/sound.js) that arrive with each frame's result.
-// This maps the program's clock onto the audio clock with a little latency,
-// so notes land exactly where the program scheduled them even when frames
-// jitter.
+// sounds as events (see src/sound.js) that arrive with each frame's result,
+// and a program with audio(t) sends chunks of samples computed a little
+// ahead of its clock. This maps the program's clock onto the audio clock with
+// a little latency, so notes land exactly where the program scheduled them
+// and chunks play back to back, even when frames jitter.
 
 import { WAVES, WAVE_GAIN, MASTER_GAIN, FADE_FLOOR, MAX_VOICES, envelopeTimes } from '../src/sound.js';
 
@@ -19,6 +20,7 @@ export class AudioEngine {
     this.offset = null;
     this.voices = 0;
     this.played = 0;
+    this.streamed = 0; // samples of audio(t) scheduled
     this.muted = muted;
     this.wanted = false; // a program tried to make sound before audio was allowed
     this.onChange = onChange;
@@ -57,6 +59,11 @@ export class AudioEngine {
       // No audio here; programs still run silently.
     }
     this.onChange?.();
+  }
+
+  /** The audio device's sample rate, once there is a context. */
+  get sampleRate() {
+    return this.ctx?.sampleRate;
   }
 
   setMuted(muted) {
@@ -99,6 +106,34 @@ export class AudioEngine {
       if (this.voices >= MAX_VOICES) break;
       this.voice(ev, Math.max(ev.at + this.offset, ctx.currentTime));
     }
+  }
+
+  /**
+   * Schedule a chunk of the program's audio(t): `samples` at `rate`, the first
+   * at program time `t0`. Consecutive chunks are contiguous in program time, so
+   * with a fixed offset they play back to back.
+   */
+  stream({ t0, rate, samples }) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== 'running') {
+      if (!this.wanted) {
+        this.wanted = true;
+        this.onChange?.();
+      }
+      return;
+    }
+    if (!this.bus) {
+      this.bus = ctx.createGain();
+      this.bus.connect(this.master);
+    }
+    if (this.offset === null || t0 + this.offset < ctx.currentTime) this.offset = ctx.currentTime + LATENCY - t0;
+    const buffer = ctx.createBuffer(1, samples.length, rate);
+    buffer.copyToChannel(samples, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.bus);
+    src.start(t0 + this.offset);
+    this.streamed += samples.length;
   }
 
   /** A short two-note chime for the UI (a finished lesson). */

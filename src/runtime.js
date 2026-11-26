@@ -112,6 +112,7 @@ export async function instantiate(compiled, opts = {}) {
   const print = opts.print ?? ((line) => console.log(line));
   const input = opts.input ?? { mouseX: compiled.width / 2, mouseY: compiled.height / 2, mouseDown: false, keys: new Set() };
   const clock = { now: opts.startTime ?? 0 };
+  const audioRate = { value: opts.sampleRate ?? 44100 }; // what sample_rate() returns
   const onSound = opts.sound ?? null;
   let memory = null;
   let parts = [];
@@ -139,6 +140,7 @@ export async function instantiate(compiled, opts = {}) {
     mouse_down: () => (input.mouseDown ? 1 : 0),
     key_down: (k) => (input.keys.has(k) ? 1 : 0),
     now: () => clock.now,
+    sample_rate: () => audioRate.value,
     __sound: (at, wave, freq, to, dur, vol) => {
       if (!onSound) return;
       // Sounds can't start in the past: late ones play right away.
@@ -163,11 +165,12 @@ export async function instantiate(compiled, opts = {}) {
 
   const { instance } = await WebAssembly.instantiate(compiled.binary, { env });
   memory = instance.exports.memory;
-  return new KilnInstance(instance, compiled, input, clock);
+  return new KilnInstance(instance, compiled, input, clock, audioRate);
 }
 
 export class KilnInstance {
-  constructor(instance, compiled, input, clock) {
+  constructor(instance, compiled, input, clock, audioRate = { value: 44100 }) {
+    this.audioRate = audioRate;
     this.clock = clock;
     this.exports = instance.exports;
     this.compiled = compiled;
@@ -177,6 +180,7 @@ export class KilnInstance {
     this.positions = compiled.positions ?? null;
     this.hasMain = typeof this.exports.main === 'function';
     this.hasFrame = typeof this.exports.frame === 'function';
+    this.hasAudio = typeof this.exports.audio === 'function';
     this.hasScreen = this.exports.__screen !== undefined;
   }
 
@@ -195,6 +199,25 @@ export class KilnInstance {
   frame(t) {
     this.clock.now = t;
     if (this.hasFrame) this.guard(() => this.exports.frame(t));
+  }
+
+  /**
+   * `n` samples of the program's audio(t), starting at time `t0`, at `rate`
+   * samples per second (which sample_rate() reports). Each is clamped to
+   * -1..1 and NaN becomes 0, so a mistake can't blast anyone's speakers.
+   */
+  audio(t0, n, rate = this.audioRate.value) {
+    const out = new Float32Array(n);
+    if (!this.hasAudio) return out;
+    this.audioRate.value = rate;
+    const f = this.exports.audio;
+    this.guard(() => {
+      for (let i = 0; i < n; i++) {
+        const v = f(t0 + i / rate);
+        out[i] = v > 1 ? 1 : v < -1 ? -1 : v === v ? v : 0;
+      }
+    });
+    return out;
   }
 
   /** Copy the 0xRRGGBB framebuffer into an RGBA byte array (e.g. ImageData.data). */
