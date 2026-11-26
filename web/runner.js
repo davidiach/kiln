@@ -2,6 +2,7 @@
 // input forwarding, and a watchdog that kills programs that hang.
 
 import { createHost } from './host.js';
+import { withSourceMapURL, sourceMapDataURL } from '../src/compiler.js';
 
 const KEYMAP = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, ' ': 32, Enter: 13, Escape: 27, Shift: 16 };
 const START_LIMIT_MS = 10000;
@@ -50,7 +51,10 @@ export class Runner {
     this.audio?.reset();
     this.stats = { startedAt: performance.now(), sounds: 0, maxSounds: 0 };
     if (resetTime) this.t0 = performance.now();
-    this.program = { binary: compiled.binary, traps: compiled.traps, width: compiled.width, height: compiled.height };
+    // The running binary carries its source map, so devtools can show and
+    // step through the Kiln source; positions let runtime errors name a line.
+    const binary = compiled.sourceMap ? withSourceMapURL(compiled.binary, sourceMapDataURL(compiled.sourceMap)) : compiled.binary;
+    this.program = { binary, traps: compiled.traps, positions: compiled.positions, width: compiled.width, height: compiled.height };
     this.hasFrame = false;
     this.ready = false;
     this.worker = this.spawn();

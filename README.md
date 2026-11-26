@@ -69,7 +69,7 @@ The command-line tool runs on Node 20+:
 ```sh
 node bin/kiln.js run examples/hello.kiln          # compile and run main()
 node bin/kiln.js wat examples/plasma.kiln         # print the generated WebAssembly text
-node bin/kiln.js build examples/fire.kiln         # write fire.wasm
+node bin/kiln.js build examples/fire.kiln         # write fire.wasm and its source map, fire.wasm.map
 node bin/kiln.js render examples/raymarch.kiln -t 3 -o shot.png   # headless screenshot
 node bin/kiln.js audio examples/sequencer.kiln -t 8 -o loop.wav    # headless audio recording
 ```
@@ -478,6 +478,13 @@ A few details I enjoyed:
   themselves.
 - **Traps know where they came from.** Bounds and division checks call an imported `__trap(site, value)`; the site
   indexes a table the compiler emits, so the runtime can say *which* array, *what* index and *which line*.
+- **Source maps.** Codegen records the Kiln statement behind every instruction. Inlined code keeps the line of the
+  function it came from, and a loop's bookkeeping stays on the loop's own line. The result is a standard version-3
+  source map whose "columns" are byte offsets in the module, with the program and the prelude embedded. `kiln build`
+  writes it next to the binary as `out.wasm.map`, and the playground attaches it to the module it runs as a `data:`
+  URL. Browsers that support WebAssembly source maps, like Chrome, can then show the Kiln source in their devtools.
+  The same table explains engine errors: a stack overflow now names the call that recursed, as in
+  `stack overflow in 'down' (line 3)`, and the playground marks that line.
 - **The playground can't be frozen.** Programs run in a Web Worker built from a blob. The main thread only requests the
   next frame when the previous one is done, and a watchdog terminates a worker that stops answering.
 - **Live edits keep the clock.** Recompiling restarts the program but not `t`, so you can tweak a shader's constants and
@@ -512,7 +519,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 144 tests: language semantics, structs, methods, operators, inlining, SIMD, locals, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 153 tests: language semantics, structs, methods, operators, inlining, SIMD, locals, source maps, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
@@ -525,7 +532,7 @@ from the default branch (enable it under *Settings → Pages → Source: GitHub 
 Kiln is deliberately small. There are no closures, generics, interfaces, heap allocation, string concatenation or
 modules; arrays are global and can't be passed around. The inliner only handles single-expression bodies, and SIMD has
 no 64-bit integer lanes, so `f64x2` has no bit-casts. Locals are reused at statement granularity, not per
-instruction. A natural next step would be source maps from wasm offsets back to lines.
+instruction, and source maps are per statement too, not per expression.
 
 ## License
 
