@@ -99,9 +99,7 @@ export class AudioEngine {
       this.bus = ctx.createGain();
       this.bus.connect(this.master);
     }
-    // Keep a fixed distance between program time and audio time; if the
-    // program fell behind (a slow frame, a background tab), start again from now.
-    if (this.offset === null || now + this.offset < ctx.currentTime) this.offset = ctx.currentTime + LATENCY - now;
+    this.sync(now);
     for (const ev of events) {
       if (this.voices >= MAX_VOICES) break;
       this.voice(ev, Math.max(ev.at + this.offset, ctx.currentTime));
@@ -109,11 +107,23 @@ export class AudioEngine {
   }
 
   /**
-   * Schedule a chunk of the program's audio(t): `samples` at `rate`, the first
-   * at program time `t0`. Consecutive chunks are contiguous in program time, so
-   * with a fixed offset they play back to back.
+   * Keep a fixed distance between program time and audio time; if the program
+   * fell behind (a slow frame, a background tab), start again from now. `now`
+   * is always the frame's time, for events and audio chunks alike (a chunk
+   * starts ahead of it), so neither path sees the other's mapping as late.
    */
-  stream({ t0, rate, samples }) {
+  sync(now) {
+    const ctx = this.ctx;
+    if (this.offset === null || now + this.offset < ctx.currentTime) this.offset = ctx.currentTime + LATENCY - now;
+  }
+
+  /**
+   * Schedule a chunk of the program's audio(t): `samples` at `rate`, the first
+   * at program time `t0`, computed during the frame at program time `now`.
+   * Consecutive chunks are contiguous in program time, so with a fixed offset
+   * they play back to back.
+   */
+  stream({ t0, rate, samples }, now) {
     const ctx = this.ctx;
     if (!ctx || ctx.state !== 'running') {
       if (!this.wanted) {
@@ -126,7 +136,7 @@ export class AudioEngine {
       this.bus = ctx.createGain();
       this.bus.connect(this.master);
     }
-    if (this.offset === null || t0 + this.offset < ctx.currentTime) this.offset = ctx.currentTime + LATENCY - t0;
+    this.sync(now);
     const buffer = ctx.createBuffer(1, samples.length, rate);
     buffer.copyToChannel(samples, 0);
     const src = ctx.createBufferSource();

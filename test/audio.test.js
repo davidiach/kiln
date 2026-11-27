@@ -72,6 +72,62 @@ test('samples are clamped to -1..1 and NaN becomes silence', async () => {
   assert.ok(s.subarray(500).every((v) => v === 0));
 });
 
+// Regression from review on PR #10: the clock used to stay at the last frame's time.
+test('inside audio(), now() and sound() follow each sample, and the frame clock comes back after', async () => {
+  const events = [];
+  const src = `
+    fn frame(t: float) { }
+    fn audio(t: float) -> float {
+      if t >= 0.25 && t < 0.25 + 1.0 / sample_rate() { beep(880.0, 0.1); }
+      return sin(TAU * 440.0 * now());
+    }`;
+  const inst = await load(src, { sound: (e) => events.push(e) });
+  inst.frame(0);
+  const s = inst.audio(0, 48000, 48000);
+  assert.ok(Math.abs(pitch(s, 48000) - 440) <= 1, `${pitch(s, 48000)} Hz`);
+  assert.equal(events.length, 1);
+  assert.ok(Math.abs(events[0].at - 0.25) < 1 / 48000 + 1e-9, `the beep is at its sample's time (${events[0].at})`);
+  assert.equal(inst.clock.now, 0, 'the frame clock is restored');
+});
+
+// Regression from review on PR #10: a chunk starts ahead of its frame, and
+// setting the clock mapping from it made the next sound event look late,
+// which shifted every later chunk by about 120 ms.
+test('the audio engine keeps chunks back to back across sound events', async () => {
+  const { AudioEngine } = await import('../web/audio.js');
+  const started = [];
+  const stub = () => new Proxy(function () {}, { get: (t, k) => (k === 'then' ? undefined : stub()), apply: () => stub() });
+  const ctx = new Proxy(
+    {
+      currentTime: 10,
+      state: 'running',
+      sampleRate: 48000,
+      createBuffer: (channels, length, sampleRate) => ({ length, sampleRate, copyToChannel() {} }),
+      createBufferSource: () => ({
+        connect() {},
+        start(when) {
+          started.push({ when, end: when + this.buffer.length / this.buffer.sampleRate });
+        },
+      }),
+    },
+    { get: (t, k) => (k in t ? t[k] : () => stub()) },
+  );
+  for (const startedLate of [false, true]) {
+    started.length = 0;
+    const engine = new AudioEngine();
+    engine.ctx = ctx;
+    engine.master = stub();
+    const chunk = (k) => ({ t0: 5 + AUDIO_LEAD + (k * 800) / 48000, rate: 48000, samples: new Float32Array(800) });
+    if (startedLate) engine.stream(chunk(0), 5); // sound enabled while audio was already streaming
+    else engine.play([{ at: 5, wave: 0, freq: 440, to: 440, dur: 0.1, vol: 0.5 }], 5);
+    if (!startedLate) engine.stream(chunk(0), 5);
+    engine.play([{ at: 5 + 1 / 60, wave: 0, freq: 440, to: 440, dur: 0.1, vol: 0.5 }], 5 + 1 / 60);
+    engine.stream(chunk(1), 5 + 1 / 60);
+    engine.stream(chunk(2), 5 + 2 / 60);
+    for (let i = 1; i < started.length; i++) assert.ok(Math.abs(started[i].when - started[i - 1].end) < 1e-9, `chunk ${i} starts where ${i - 1} ended`);
+  }
+});
+
 test('audio(t) is an entry point: checked, exported, and enough to run on its own', () => {
   has(errors('fn audio(t: int) -> float { return 0.0; }'), /'audio' must look like: fn audio\(t: float\) -> float.*every audio sample/);
   has(errors('fn audio(t: float) { }'), /'audio' must look like/);

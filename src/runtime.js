@@ -205,18 +205,27 @@ export class KilnInstance {
    * `n` samples of the program's audio(t), starting at time `t0`, at `rate`
    * samples per second (which sample_rate() reports). Each is clamped to
    * -1..1 and NaN becomes 0, so a mistake can't blast anyone's speakers.
+   * While a sample is computed, the program clock (now(), and the time of
+   * sound() events) reads that sample's time; afterwards it's restored.
    */
   audio(t0, n, rate = this.audioRate.value) {
     const out = new Float32Array(n);
     if (!this.hasAudio) return out;
     this.audioRate.value = rate;
     const f = this.exports.audio;
-    this.guard(() => {
-      for (let i = 0; i < n; i++) {
-        const v = f(t0 + i / rate);
-        out[i] = v > 1 ? 1 : v < -1 ? -1 : v === v ? v : 0;
-      }
-    });
+    const frameTime = this.clock.now;
+    try {
+      this.guard(() => {
+        for (let i = 0; i < n; i++) {
+          const t = t0 + i / rate;
+          this.clock.now = t;
+          const v = f(t);
+          out[i] = v > 1 ? 1 : v < -1 ? -1 : v === v ? v : 0;
+        }
+      });
+    } finally {
+      this.clock.now = frameTime;
+    }
     return out;
   }
 

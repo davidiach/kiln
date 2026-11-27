@@ -136,7 +136,7 @@ export class Runner {
       this.stats.maxSounds = Math.max(this.stats.maxSounds, msg.sounds.length);
       this.audio?.play(msg.sounds, msg.t);
     }
-    if (msg.audio) this.audio?.stream(msg.audio);
+    if (msg.audio) this.audio?.stream(msg.audio, msg.t);
     if (msg.pixels) {
       this.image.data.set(msg.pixels);
       this.ctx.putImageData(this.image, 0, 0);
