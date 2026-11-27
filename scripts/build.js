@@ -22,6 +22,7 @@ const EXAMPLES = [
   ['life', 'Game of Life'],
   ['particles', 'Particle fountain'],
   ['sequencer', 'Step sequencer (sound)'],
+  ['synth', 'Synthesizer (audio(t))'],
   ['dodge', 'Stardust (a game, with sound)'],
 ];
 

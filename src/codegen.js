@@ -125,7 +125,7 @@ class Generator {
     const ck = this.ck;
 
     // ---- reachability (dead code elimination)
-    const roots = ck.funcs.filter((f) => f === ck.main || f === ck.frame || f.exported);
+    const roots = ck.funcs.filter((f) => f === ck.main || f === ck.frame || f === ck.audio || f.exported);
     const live = new Set();
     const stack = [...roots];
     while (stack.length) {
@@ -226,7 +226,7 @@ class Generator {
 
     const exports = [{ name: 'memory', kind: 2, index: 0 }];
     for (const f of this.funcs) {
-      if (f === ck.main || f === ck.frame || f.exported) exports.push({ name: f.name, kind: 0, index: f.index, fn: f });
+      if (f === ck.main || f === ck.frame || f === ck.audio || f.exported) exports.push({ name: f.name, kind: 0, index: f.index, fn: f });
     }
     if (screen) {
       exports.push({ name: '__screen', kind: 3, index: allGlobals.length });

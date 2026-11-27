@@ -4,7 +4,7 @@
 
 import { WAVE_GAIN, MASTER_GAIN, envelopeAt } from './sound.js';
 
-export function renderSounds(events, seconds, rate = 44100, seed = 1) {
+export function renderSounds(events, seconds, rate = 44100, seed = 1, stream = null) {
   const total = Math.ceil(seconds * rate);
   const out = new Float32Array(total);
   let state = seed >>> 0 || 1;
@@ -40,6 +40,8 @@ export function renderSounds(events, seconds, rate = 44100, seed = 1) {
       out[start + i] += s * gain * envelopeAt(t, ev.dur);
     }
   }
+  // A program's audio(t) samples, at the same master volume the browser uses
+  if (stream) for (let i = 0; i < total && i < stream.length; i++) out[i] += stream[i] * MASTER_GAIN;
   for (let i = 0; i < total; i++) out[i] = Math.tanh(out[i]); // soft clip
   return out;
 }

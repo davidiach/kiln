@@ -52,6 +52,7 @@ export const IMPORTS = {
   mouse_down: { params: [], ret: B },
   key_down: { params: [I], ret: B },
   now: { params: [], ret: F },
+  sample_rate: { params: [], ret: F },
   __print_i: { params: [I], ret: 'void' },
   __print_f: { params: [F], ret: 'void' },
   __print_f32: { params: [F], ret: 'void' },

@@ -90,12 +90,24 @@ async function main(argv) {
         const secs = Number(arg(rest, '-t', 4));
         const out = arg(rest, '-o', `${stem}.wav`);
         const events = [];
-        const inst = await instantiate(result, { print: () => {}, random: seeded(1234), sound: (e) => events.push(e) });
+        const rate = 44100;
+        const inst = await instantiate(result, { print: () => {}, random: seeded(1234), sound: (e) => events.push(e), sampleRate: rate });
         inst.main();
+        // audio(t) runs between frames, as in the playground, so it sees what frame() changed
+        const stream = inst.hasAudio ? new Float32Array(Math.ceil(secs * rate)) : null;
+        let done = 0;
         const frames = Math.round(secs * 60);
-        for (let i = 0; i <= frames; i++) inst.frame(i / 60);
-        writeFileSync(out, encodeWav(renderSounds(events, secs), 44100));
-        console.log(`wrote ${out} (${secs}s, ${events.length} sound${events.length === 1 ? '' : 's'})`);
+        for (let i = 0; i <= frames; i++) {
+          inst.frame(i / 60);
+          if (stream) {
+            const end = Math.min(stream.length, Math.round(((i + 1) / 60) * rate));
+            if (end > done) stream.set(inst.audio(done / rate, end - done, rate), done);
+            done = Math.max(done, end);
+          }
+        }
+        writeFileSync(out, encodeWav(renderSounds(events, secs, rate, 1, stream), rate));
+        const what = [`${events.length} sound${events.length === 1 ? '' : 's'}`, ...(stream ? ['audio(t)'] : [])].join(' + ');
+        console.log(`wrote ${out} (${secs}s, ${what})`);
         break;
       }
       default:

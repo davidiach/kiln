@@ -32,7 +32,7 @@ code on the left and watch it run at native speed on a 320×240 screen on the ri
 </tr>
 <tr>
 <td><img src="docs/img/hello.png" width="320" alt="Hello, Kiln"><br><sub><b>hello</b>: a guided first program</sub></td>
-<td></td>
+<td><img src="docs/img/synth.png" width="320" alt="Synthesizer"><br><sub><b>synth</b>: a playable synthesizer, computed sample by sample</sub></td>
 </tr>
 </table>
 
@@ -419,6 +419,37 @@ Every event follows one small spec ([`src/sound.js`](src/sound.js)), implemented
 playground, and by a software synth ([`src/synth.js`](src/synth.js)) that `kiln audio` uses to record WAV files. The
 software synth is also what the tests listen to: they measure pitch, slides, timing and the envelope from the samples.
 
+#### Programmable audio
+
+For sounds the five waves can't make, a program can compute the audio itself. Define `audio(t)` and it is called
+for every sample, `sample_rate()` times a second, with the time in seconds. It returns the sample, from -1 to 1:
+
+```rust
+fn audio(t: float) -> float {
+  return 0.3 * sin(TAU * 440.0 * t);   // a pure A
+}
+```
+
+`audio(t)` runs in the same WebAssembly instance as `frame(t)`, so they share globals. `frame()` can read the
+keyboard and set a pitch, and `audio()` can play it and record the waveform for `frame()` to draw. The
+[synth](examples/synth.kiln) example works like this. It keeps four voices in one `f32x4`, so each `+` and `*`
+advances all four sawtooths, envelopes included. It mixes them through a low-pass filter you sweep with the mouse,
+and draws an oscilloscope of its own output. You play it with the keys A–K.
+
+How it plays:
+
+- **In the worker:** the worker computes each frame's audio up to 120 ms ahead of the program clock, at the audio
+  device's sample rate, and sends the samples along with the pixels.
+- **On the page:** the page schedules each chunk on the same clock as sound events, so chunks play back to back.
+  In a headless Chromium check, every chunk started exactly where the previous one ended.
+- **Latency:** a key press takes up to about 120 ms to be heard. If frames fall behind, the audio skips ahead
+  rather than playing stale sound.
+- **Safety:** samples are clamped to -1..1 and NaN becomes silence, so a bug can't blast anyone's speakers.
+
+`kiln audio` mixes the same stream into its WAV, at the playground's master volume. `audio()` runs between frames
+there too, so it sees what `frame()` changed. `sound()` events and `audio(t)` mix together, and a program can have
+`audio(t)` and nothing else.
+
 ### Friendly errors
 
 The checker reports every type error it finds, with a span, and offers suggestions where it can:
@@ -519,7 +550,7 @@ Here's `fib` as the compiler emits it (from the playground's WebAssembly tab):
 ## Development
 
 ```sh
-npm test           # 153 tests: language semantics, structs, methods, operators, inlining, SIMD, locals, source maps, sound, the tour's lessons, errors, runtime traps, examples, the build
+npm test           # 165 tests: language semantics, structs, methods, operators, inlining, SIMD, locals, source maps, sound, the tour's lessons, errors, runtime traps, examples, the build
 npm run build      # dist/index.html
 npm run serve      # build + serve on :8000
 ```
